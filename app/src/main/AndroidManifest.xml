@@ -4,7 +4,10 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <application android:label="SamCam" android:icon="@drawable/ic_logo"
+    <queries>
+        <package android:name="com.google.android.apps.photos" />
+    </queries>
+    <application android:label="Camera" android:icon="@drawable/ic_logo"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true"
             android:screenOrientation="portrait">
