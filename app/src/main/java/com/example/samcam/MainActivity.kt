@@ -1,7 +1,4 @@
-@file:OptIn(
-    androidx.camera.camera2.interop.ExperimentalCamera2Interop::class,
-    androidx.camera.core.ExperimentalGetImage::class
-)
+@file:OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
 
 package com.example.samcam
 
@@ -13,9 +10,16 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Rect
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
@@ -26,6 +30,7 @@ import android.provider.MediaStore
 import android.util.Range
 import android.util.Size
 import android.view.KeyEvent
+import android.view.Surface
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -50,7 +55,6 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.FileDescriptorOutputOptions
-import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
@@ -59,6 +63,7 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -71,6 +76,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.*
@@ -79,7 +85,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -89,18 +100,24 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
 enum class Mode(val label: String) {
-    PHOTO("PHOTO"), VIDEO("VIDEO"), PRO("PRO"), TIMELAPSE("TIME-LAPSE"), QR("QR SCAN")
+    PRO("Pro"), PHOTO("Photo"), VIDEO("Video"), TIMELAPSE("Time-lapse"), QR("QR scan")
 }
 
 object Bus {
@@ -108,6 +125,7 @@ object Bus {
     var enabled = true
 }
 
+val YELLOW = Color(0xFFFFC107)
 val sizeNames = listOf("Max", "8M", "3M")
 val sizeLong = listOf(0, 3264, 2048)
 val jpegNames = listOf("Max (100)", "High (95)", "Normal (85)")
@@ -122,10 +140,16 @@ val wbVals = listOf(
     CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT, CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT,
     CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT
 )
-val extraModes = listOf(Mode.PRO, Mode.TIMELAPSE, Mode.QR)
 
 fun shutLabel(ns: Long): String =
     if (ns <= 0L) "-" else if (ns >= 100_000_000L) "%.1fs".format(ns / 1e9) else "1/${(1e9 / ns).toInt()}"
+
+fun fmtTime(s: Long): String {
+    val h = s / 3600
+    val m = (s % 3600) / 60
+    val sec = s % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%02d:%02d".format(m, sec)
+}
 
 fun treeRoot(tree: Uri): Uri =
     DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
@@ -135,6 +159,121 @@ fun docCreate(ctx: Context, parent: Uri, mime: String, name: String): Uri? {
         DocumentsContract.createDocument(ctx.contentResolver, parent, mime, name)
     } catch (e: Exception) {
         null
+    }
+}
+
+class VideoOut(val pfd: ParcelFileDescriptor, val uri: Uri)
+
+fun openVideoOut(ctx: Context, tree: Uri?, name: String, relPath: String): VideoOut? {
+    try {
+        if (tree != null) {
+            val doc = docCreate(ctx, treeRoot(tree), "video/mp4", "$name.mp4")
+            if (doc != null) {
+                val p = ctx.contentResolver.openFileDescriptor(doc, "rw")
+                if (p != null) return VideoOut(p, doc)
+            }
+        }
+        val cv = ContentValues()
+        cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+        cv.put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+        cv.put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
+        val uri = ctx.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, cv) ?: return null
+        val p = ctx.contentResolver.openFileDescriptor(uri, "rw") ?: return null
+        return VideoOut(p, uri)
+    } catch (e: Exception) {
+        return null
+    }
+}
+
+fun loadThumb(ctx: Context, uri: Uri, mime: String): Bitmap? {
+    try {
+        if (Build.VERSION.SDK_INT >= 29) {
+            return ctx.contentResolver.loadThumbnail(uri, Size(200, 200), null)
+        }
+    } catch (e: Exception) {
+    }
+    if (mime.startsWith("image")) {
+        try {
+            val opts = BitmapFactory.Options()
+            opts.inSampleSize = 8
+            ctx.contentResolver.openInputStream(uri)?.use { return BitmapFactory.decodeStream(it, null, opts) }
+        } catch (e: Exception) {
+        }
+    }
+    return null
+}
+
+class TimelapseEncoder(val w: Int, val h: Int, private val pfd: ParcelFileDescriptor) {
+    private val dst = Rect(0, 0, w, h)
+    private val info = MediaCodec.BufferInfo()
+    private val codec: MediaCodec
+    private val inputSurface: Surface
+    private val muxer: MediaMuxer
+    private var track = -1
+    private var started = false
+    private var written = 0
+
+    init {
+        val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h)
+        fmt.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+        fmt.setInteger(MediaFormat.KEY_BIT_RATE, 10_000_000)
+        fmt.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+        fmt.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+        codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        inputSurface = codec.createInputSurface()
+        codec.start()
+        muxer = MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+    }
+
+    fun addFrame(bmp: Bitmap) {
+        val canvas = inputSurface.lockCanvas(null)
+        try {
+            canvas.drawBitmap(bmp, null, dst, null)
+        } finally {
+            inputSurface.unlockCanvasAndPost(canvas)
+        }
+        drain(false)
+    }
+
+    private fun drain(end: Boolean) {
+        var idle = 0
+        while (true) {
+            val idx = codec.dequeueOutputBuffer(info, if (end) 10_000L else 0L)
+            if (idx == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (!end) return
+                idle++
+                if (idle > 300) return
+            } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                track = muxer.addTrack(codec.outputFormat)
+                muxer.start()
+                started = true
+            } else if (idx >= 0) {
+                idle = 0
+                val buf = codec.getOutputBuffer(idx)
+                if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) info.size = 0
+                if (info.size > 0 && started && buf != null) {
+                    buf.position(info.offset)
+                    buf.limit(info.offset + info.size)
+                    info.presentationTimeUs = written * 33_333L
+                    muxer.writeSampleData(track, buf, info)
+                    written++
+                }
+                codec.releaseOutputBuffer(idx, false)
+                if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) return
+            }
+        }
+    }
+
+    fun finish() {
+        try { codec.signalEndOfInputStream() } catch (e: Exception) {}
+        try { drain(true) } catch (e: Exception) {}
+        try { codec.stop() } catch (e: Exception) {}
+        try { codec.release() } catch (e: Exception) {}
+        try { inputSurface.release() } catch (e: Exception) {}
+        try { if (started) muxer.stop() } catch (e: Exception) {}
+        try { muxer.release() } catch (e: Exception) {}
+        try { pfd.close() } catch (e: Exception) {}
     }
 }
 
@@ -197,12 +336,12 @@ fun Splash() {
     Box(Modifier.fillMaxSize().background(Color(0xFF12151C)), Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Canvas(Modifier.size(120.dp)) {
-                drawCircle(Color(0xFFFFC107), radius = size.minDimension / 2)
+                drawCircle(YELLOW, radius = size.minDimension / 2)
                 drawCircle(Color(0xFF12151C), radius = size.minDimension * 0.36f)
-                drawCircle(Color(0xFFFFC107), radius = size.minDimension * 0.2f)
+                drawCircle(YELLOW, radius = size.minDimension * 0.2f)
             }
             Spacer(Modifier.height(16.dp))
-            Text("SamCam", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            Text("Camera", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -236,7 +375,13 @@ fun CameraScreen() {
     val owner = ctx as ComponentActivity
     val scope = rememberCoroutineScope()
     val exec = remember { ContextCompat.getMainExecutor(ctx) }
-    val previewView = remember { PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+    val analysisExec = remember { Executors.newSingleThreadExecutor() }
+    val previewView = remember {
+        PreviewView(ctx).apply {
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        }
+    }
     val scanner = remember { BarcodeScanning.getClient() }
     val camIds = remember {
         try {
@@ -246,6 +391,7 @@ fun CameraScreen() {
         }
     }
     val prefs = remember { ctx.getSharedPreferences("samcam", Context.MODE_PRIVATE) }
+    val modeOrder = remember { Mode.values().toList() }
 
     var sdUri by remember {
         mutableStateOf<Uri?>(
@@ -270,7 +416,6 @@ fun CameraScreen() {
     }
 
     var mode by remember { mutableStateOf(Mode.PHOTO) }
-    var showMore by remember { mutableStateOf(false) }
     var front by remember { mutableStateOf(false) }
     var camChoice by remember { mutableIntStateOf(0) }
     var ratio43 by remember { mutableStateOf(true) }
@@ -287,6 +432,7 @@ fun CameraScreen() {
     var volShutter by remember { mutableStateOf(true) }
     var mirror by remember { mutableStateOf(true) }
     var forceFps by remember { mutableStateOf(false) }
+    var usePhotos by remember { mutableStateOf(prefs.getBoolean("photos", true)) }
     var showSettings by remember { mutableStateOf(false) }
     var showInfo by remember { mutableStateOf(false) }
     var qr by remember { mutableStateOf<String?>(null) }
@@ -297,6 +443,12 @@ fun CameraScreen() {
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var videoCapture by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
     var zoom by remember { mutableFloatStateOf(1f) }
+    var minZoom by remember { mutableFloatStateOf(1f) }
+    var maxZoom by remember { mutableFloatStateOf(1f) }
+    var elapsed by remember { mutableLongStateOf(0L) }
+    var lastUri by remember { mutableStateOf<Uri?>(prefs.getString("last_uri", null)?.let { Uri.parse(it) }) }
+    var lastMime by remember { mutableStateOf(prefs.getString("last_mime", "image/jpeg") ?: "image/jpeg") }
+    var thumb by remember { mutableStateOf<Bitmap?>(null) }
 
     var proWb by remember { mutableIntStateOf(0) }
     var ev by remember { mutableIntStateOf(0) }
@@ -311,8 +463,8 @@ fun CameraScreen() {
     var minFocus by remember { mutableFloatStateOf(0f) }
 
     val use43 = ratio43 && mode != Mode.VIDEO
-    val busy = recording != null || tlJob != null
-    val stills = mode == Mode.PHOTO || mode == Mode.PRO || mode == Mode.TIMELAPSE
+    val isRec = recording != null
+    val capturing = isRec || tlJob != null
     val ir = isoRange
     val xr = expRange
     val isoVal = if (ir != null) (ir.lower + proIsoF * (ir.upper - ir.lower)).toInt() else 0
@@ -321,6 +473,37 @@ fun CameraScreen() {
         val hi = minOf(xr.upper, 500_000_000L).toDouble().coerceAtLeast(lo)
         (lo * Math.pow(hi / lo, proShutF.toDouble())).toLong()
     } else 0L
+
+    fun toast(s: String) {
+        Toast.makeText(ctx, s, Toast.LENGTH_LONG).show()
+    }
+
+    fun setLast(u: Uri?, mime: String) {
+        if (u != null) {
+            lastUri = u
+            lastMime = mime
+            prefs.edit().putString("last_uri", u.toString()).putString("last_mime", mime).apply()
+        }
+    }
+
+    fun stamp(): String = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+
+    LaunchedEffect(lastUri) {
+        val u = lastUri
+        thumb = if (u == null) null else withContext(Dispatchers.IO) { loadThumb(ctx, u, lastMime) }
+    }
+
+    LaunchedEffect(capturing) {
+        if (capturing) {
+            val t0 = System.currentTimeMillis()
+            while (true) {
+                elapsed = (System.currentTimeMillis() - t0) / 1000
+                delay(250)
+            }
+        } else {
+            elapsed = 0L
+        }
+    }
 
     LaunchedEffect(mode, front, camChoice, ratio43, sizeIdx, jpegIdx, vqIdx, fpsIdx) {
         val provider = suspendCoroutine<ProcessCameraProvider> { c ->
@@ -375,23 +558,25 @@ fun CameraScreen() {
                 Mode.QR -> {
                     val analysis = ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
-                    analysis.setAnalyzer(exec) { proxy ->
-                        val media = proxy.image
-                        if (media == null) {
-                            proxy.close()
-                        } else {
-                            val img = InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees)
+                    analysis.setAnalyzer(analysisExec) { proxy ->
+                        try {
+                            val bmp = proxy.toBitmap()
+                            val img = InputImage.fromBitmap(bmp, proxy.imageInfo.rotationDegrees)
                             scanner.process(img)
                                 .addOnSuccessListener { list ->
                                     val v = list.firstOrNull()?.rawValue
                                     if (v != null && qr == null) qr = v
                                 }
                                 .addOnCompleteListener { proxy.close() }
+                        } catch (e: Exception) {
+                            proxy.close()
                         }
                     }
                     cases.add(analysis)
                 }
-                else -> {
+                Mode.TIMELAPSE -> {
+                }
+                Mode.PHOTO, Mode.PRO -> {
                     val ic = ImageCapture.Builder()
                         .setResolutionSelector(imageRs)
                         .setCaptureMode(
@@ -419,11 +604,7 @@ fun CameraScreen() {
                     val ranges = c2i.getCameraCharacteristic(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
                     val offered = ranges != null && ranges.any { it.upper >= want }
                     if (!offered) {
-                        Toast.makeText(
-                            ctx,
-                            "${want}fps is not offered by this camera driver. Turn on Force 60fps in Settings to try anyway.",
-                            Toast.LENGTH_LONG
-                        ).show()
+                        toast("${want}fps is not offered by this camera driver. Turn on Force 60fps in Settings to try anyway.")
                     }
                 }
             } catch (e: Exception) {
@@ -432,10 +613,15 @@ fun CameraScreen() {
                 minFocus = 0f
                 evRange = null
             }
+            delay(300)
+            val zst = cam.cameraInfo.zoomState.value
+            minZoom = zst?.minZoomRatio ?: 1f
+            maxZoom = minOf(zst?.maxZoomRatio ?: 1f, 8f)
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             if (camChoice > 0) {
                 camChoice = 0
-                Toast.makeText(ctx, "That camera ID did not open. Back to Auto.", Toast.LENGTH_LONG).show()
+                toast("That camera ID did not open. Back to Auto.")
                 return@LaunchedEffect
             }
             try {
@@ -446,9 +632,9 @@ fun CameraScreen() {
                 camera = provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, pv, ic)
                 imageCapture = ic
                 videoCapture = null
-                Toast.makeText(ctx, "Safe mode (photo only): ${e.message}", Toast.LENGTH_LONG).show()
+                toast("Safe mode (photo only): ${e.message}")
             } catch (e2: Exception) {
-                Toast.makeText(ctx, "Camera error: ${e2.message}", Toast.LENGTH_LONG).show()
+                toast("Camera error: ${e2.message}")
             }
         }
     }
@@ -498,11 +684,9 @@ fun CameraScreen() {
             }
             if (any) c2.setCaptureRequestOptions(b.build()) else c2.clearCaptureRequestOptions()
         } catch (e: Exception) {
-            Toast.makeText(ctx, "Camera options not accepted: ${e.message}", Toast.LENGTH_SHORT).show()
+            toast("Camera options not accepted: ${e.message}")
         }
     }
-
-    fun stamp(): String = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
 
     fun values(mime: String, dir: String): ContentValues {
         val cv = ContentValues()
@@ -512,30 +696,25 @@ fun CameraScreen() {
         return cv
     }
 
-    fun takePhoto(dir: String, sdParent: Uri?, quiet: Boolean, onDone: () -> Unit) {
+    fun takePhoto() {
         val ic = imageCapture ?: return
         val meta = ImageCapture.Metadata()
         meta.isReversedHorizontal = front && mirror
-        var stream: OutputStream? = null
-        if (sdParent != null) {
-            val doc = docCreate(ctx, sdParent, "image/jpeg", "${stamp()}.jpg")
-            if (doc != null) {
-                stream = try {
-                    ctx.contentResolver.openOutputStream(doc)
-                } catch (e: Exception) {
-                    null
-                }
+        val tree = sdUri
+        val doc: Uri? = if (tree != null) docCreate(ctx, treeRoot(tree), "image/jpeg", "${stamp()}.jpg") else null
+        val s: OutputStream? = if (doc != null) {
+            try {
+                ctx.contentResolver.openOutputStream(doc)
+            } catch (e: Exception) {
+                null
             }
-            if (stream == null && !quiet) {
-                Toast.makeText(ctx, "SD folder not writable, saving to phone", Toast.LENGTH_LONG).show()
-            }
-        }
-        val s = stream
+        } else null
+        if (tree != null && s == null) toast("SD folder not writable, saving to phone")
         val builder = if (s != null) {
             ImageCapture.OutputFileOptions.Builder(s)
         } else {
             ImageCapture.OutputFileOptions.Builder(
-                ctx.contentResolver, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values("image/jpeg", dir)
+                ctx.contentResolver, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values("image/jpeg", "DCIM/SamCam")
             )
         }
         ic.takePicture(builder.setMetadata(meta).build(), exec, object : ImageCapture.OnImageSavedCallback {
@@ -544,8 +723,7 @@ fun CameraScreen() {
                     s?.close()
                 } catch (e: Exception) {
                 }
-                if (!quiet) Toast.makeText(ctx, if (s != null) "Saved to SD folder" else "Saved to $dir", Toast.LENGTH_SHORT).show()
-                onDone()
+                setLast(r.savedUri ?: doc, "image/jpeg")
             }
 
             override fun onError(e: ImageCaptureException) {
@@ -553,51 +731,78 @@ fun CameraScreen() {
                     s?.close()
                 } catch (x: Exception) {
                 }
-                Toast.makeText(ctx, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                toast("Error: ${e.message}")
             }
         })
     }
+
+    var recOut by remember { mutableStateOf<VideoOut?>(null) }
 
     fun toggleRecord() {
         val active = recording
         if (active != null) {
             active.stop()
-            recording = null
             return
         }
         val vc = videoCapture ?: return
-        var pfd: ParcelFileDescriptor? = null
-        val tree = sdUri
-        if (tree != null) {
-            val doc = docCreate(ctx, treeRoot(tree), "video/mp4", "${stamp()}.mp4")
-            if (doc != null) {
-                pfd = try {
-                    ctx.contentResolver.openFileDescriptor(doc, "rw")
-                } catch (e: Exception) {
-                    null
-                }
-            }
-            if (pfd == null) Toast.makeText(ctx, "SD folder not writable, saving to phone", Toast.LENGTH_LONG).show()
+        val out = openVideoOut(ctx, sdUri, stamp(), "DCIM/SamCam")
+        if (out == null) {
+            toast("Could not create the video file")
+            return
         }
-        val fd = pfd
-        var pending = if (fd != null) {
-            vc.output.prepareRecording(ctx, FileDescriptorOutputOptions.Builder(fd).build())
-        } else {
-            vc.output.prepareRecording(
-                ctx,
-                MediaStoreOutputOptions.Builder(ctx.contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
-                    .setContentValues(values("video/mp4", "DCIM/SamCam")).build()
-            )
-        }
+        recOut = out
+        var pending = vc.output.prepareRecording(ctx, FileDescriptorOutputOptions.Builder(out.pfd).build())
         if (mic) pending = pending.withAudioEnabled()
         recording = pending.start(exec) { evt ->
             if (evt is VideoRecordEvent.Finalize) {
                 recording = null
                 try {
-                    fd?.close()
+                    out.pfd.close()
                 } catch (e: Exception) {
                 }
-                Toast.makeText(ctx, if (evt.hasError()) "Video error ${evt.error}" else "Video saved", Toast.LENGTH_SHORT).show()
+                if (evt.hasError()) toast("Video error ${evt.error}") else setLast(out.uri, "video/mp4")
+            }
+        }
+    }
+
+    fun startTimelapse() {
+        tlCount = 0
+        tlJob = scope.launch {
+            var enc: TimelapseEncoder? = null
+            var out: VideoOut? = null
+            try {
+                while (isActive) {
+                    val bmp = previewView.bitmap
+                    if (bmp != null) {
+                        if (enc == null) {
+                            val sc = minOf(1f, 1920f / maxOf(bmp.width, bmp.height))
+                            val w = ((bmp.width * sc).toInt() / 2) * 2
+                            val h = ((bmp.height * sc).toInt() / 2) * 2
+                            val o = openVideoOut(ctx, sdUri, stamp() + "_TL", "DCIM/SamCam")
+                            if (o == null) {
+                                toast("Could not create the video file")
+                                break
+                            }
+                            out = o
+                            enc = TimelapseEncoder(w, h, o.pfd)
+                        }
+                        val e = enc ?: break
+                        withContext(Dispatchers.Default) { e.addFrame(bmp) }
+                        tlCount = tlCount + 1
+                    }
+                    delay(tlVals[tlIdx] * 1000L)
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                toast("Time-lapse error: ${e.message}")
+            } finally {
+                val e2 = enc
+                val o2 = out
+                withContext(NonCancellable + Dispatchers.IO) {
+                    if (e2 != null) e2.finish() else try { o2?.pfd?.close() } catch (x: Exception) {}
+                }
+                if (e2 != null && o2 != null && tlCount > 0) setLast(o2.uri, "video/mp4")
+                tlJob = null
             }
         }
     }
@@ -607,8 +812,6 @@ fun CameraScreen() {
             if (mode == Mode.QR) return@launch
             if (mode == Mode.TIMELAPSE && tlJob != null) {
                 tlJob?.cancel()
-                tlJob = null
-                Toast.makeText(ctx, "Time-lapse stopped: $tlCount frames saved", Toast.LENGTH_LONG).show()
                 return@launch
             }
             if (timer > 0 && recording == null) {
@@ -618,25 +821,51 @@ fun CameraScreen() {
                 }
                 countdown = 0
             }
-            if (mode == Mode.VIDEO) {
-                toggleRecord()
-            } else if (mode == Mode.TIMELAPSE) {
-                val name = "TL_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                val tree = sdUri
-                val sdDir: Uri? = if (tree != null) {
-                    docCreate(ctx, treeRoot(tree), DocumentsContract.Document.MIME_TYPE_DIR, name)
-                } else null
-                tlCount = 0
-                tlJob = scope.launch {
-                    while (true) {
-                        takePhoto("DCIM/SamCam/$name", sdDir, true) { tlCount = tlCount + 1 }
-                        delay(tlVals[tlIdx] * 1000L)
-                    }
-                }
-            } else {
-                val tree = sdUri
-                takePhoto("DCIM/SamCam", if (tree != null) treeRoot(tree) else null, false) {}
+            when (mode) {
+                Mode.VIDEO -> toggleRecord()
+                Mode.TIMELAPSE -> startTimelapse()
+                else -> takePhoto()
             }
+        }
+    }
+
+    fun openGallery() {
+        val u = lastUri
+        if (u != null) {
+            val base = Intent(Intent.ACTION_VIEW).setDataAndType(u, lastMime)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (usePhotos) {
+                try {
+                    ctx.startActivity(Intent(base).setPackage("com.google.android.apps.photos"))
+                    return
+                } catch (e: Exception) {
+                }
+            }
+            try {
+                ctx.startActivity(base)
+                return
+            } catch (e: Exception) {
+            }
+        }
+        try {
+            val li = ctx.packageManager.getLaunchIntentForPackage("com.google.android.apps.photos")
+            if (usePhotos && li != null) {
+                ctx.startActivity(li)
+                return
+            }
+            ctx.startActivity(
+                Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_GALLERY)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (e: Exception) {
+            toast("No gallery app found")
+        }
+    }
+
+    fun selectMode(m: Mode) {
+        if (!capturing) {
+            qr = null
+            mode = m
         }
     }
 
@@ -655,8 +884,7 @@ fun CameraScreen() {
                 }
                 .pointerInput(Unit) {
                     detectTransformGestures { _, _, z, _ ->
-                        val s = camera?.cameraInfo?.zoomState?.value
-                        zoom = (zoom * z).coerceIn(s?.minZoomRatio ?: 1f, s?.maxZoomRatio ?: 8f)
+                        zoom = (zoom * z).coerceIn(minZoom, maxOf(minZoom, maxZoom))
                     }
                 }
         ) {
@@ -672,21 +900,6 @@ fun CameraScreen() {
             }
             if (countdown > 0) {
                 Text("$countdown", Modifier.align(Alignment.Center), color = Color.White, fontSize = 96.sp)
-            }
-            if (tlJob != null) {
-                Text(
-                    "● $tlCount frames", Modifier.align(Alignment.TopCenter).padding(8.dp),
-                    color = Color(0xFFE53935), fontSize = 14.sp, fontWeight = FontWeight.Bold
-                )
-            }
-            if (qr == null && mode != Mode.PRO) {
-                Text(
-                    "%.1fx".format(zoom),
-                    Modifier.align(Alignment.BottomCenter).padding(8.dp)
-                        .clip(RoundedCornerShape(50)).background(Color(0x66000000))
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                    color = Color.White, fontSize = 13.sp
-                )
             }
             val qrText = qr
             if (qrText != null) {
@@ -716,36 +929,60 @@ fun CameraScreen() {
             }
         }
 
-        Row(
-            Modifier.align(Alignment.TopCenter).padding(top = 8.dp).clip(RoundedCornerShape(50))
-                .background(Color(0x33FFFFFF)).padding(horizontal = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            PillBtn("⚙", false) { showSettings = true }
-            if (mode != Mode.QR) PillBtn(listOf("⚡off", "⚡auto", "⚡on")[flash], flash != 0) { flash = (flash + 1) % 3 }
-            if (mode != Mode.QR) {
-                PillBtn(if (timer == 0) "⏱" else "⏱${timer}s", timer != 0) {
-                    timer = when (timer) {
-                        0 -> 3
-                        3 -> 10
-                        else -> 0
-                    }
+        if (capturing) {
+            Row(
+                Modifier.align(Alignment.TopCenter).padding(top = 12.dp)
+                    .clip(RoundedCornerShape(50)).background(Color(0x66000000))
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.size(10.dp).clip(CircleShape).background(Color(0xFFE53935)))
+                Spacer(Modifier.width(8.dp))
+                Text(fmtTime(elapsed), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                if (tlJob != null) {
+                    Spacer(Modifier.width(10.dp))
+                    Text("$tlCount frames", color = Color(0xCCFFFFFF), fontSize = 12.sp)
                 }
             }
-            if (stills) PillBtn(if (ratio43) "3:4" else "9:16", false) { ratio43 = !ratio43 }
-            if (stills) PillBtn(sizeNames[sizeIdx], false) { sizeIdx = (sizeIdx + 1) % sizeNames.size }
-            if (mode == Mode.VIDEO) PillBtn(vqNames[vqIdx], false) { vqIdx = (vqIdx + 1) % vqNames.size }
-            if (mode == Mode.VIDEO) {
-                PillBtn("${fpsVals[fpsIdx]}fps", forceFps && fpsVals[fpsIdx] > 30) { fpsIdx = (fpsIdx + 1) % fpsVals.size }
+        } else {
+            Row(
+                Modifier.align(Alignment.TopCenter).fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconBox({ showSettings = true }) { GearIcon() }
+                if (mode != Mode.QR) IconBox({ flash = (flash + 1) % 3 }) { FlashIcon(flash) }
+                if (mode != Mode.QR) {
+                    IconBox({
+                        timer = when (timer) {
+                            0 -> 3
+                            3 -> 10
+                            else -> 0
+                        }
+                    }) { TimerIcon(timer) }
+                }
+                if (mode == Mode.PHOTO || mode == Mode.PRO || mode == Mode.TIMELAPSE) {
+                    IconBox({ ratio43 = !ratio43 }) { TextIcon(if (ratio43) "3:4" else "9:16", false) }
+                }
+                if (mode == Mode.PHOTO || mode == Mode.PRO) {
+                    IconBox({ sizeIdx = (sizeIdx + 1) % sizeNames.size }) { TextIcon(sizeNames[sizeIdx], false) }
+                }
+                if (mode == Mode.VIDEO) {
+                    IconBox({ vqIdx = (vqIdx + 1) % vqNames.size }) { TextIcon(vqNames[vqIdx], false) }
+                    IconBox({ fpsIdx = (fpsIdx + 1) % fpsVals.size }) {
+                        TextIcon("${fpsVals[fpsIdx]}fps", forceFps && fpsVals[fpsIdx] > 30)
+                    }
+                }
+                if (mode == Mode.TIMELAPSE) {
+                    IconBox({ tlIdx = (tlIdx + 1) % tlVals.size }) { TextIcon("${tlVals[tlIdx]}s", false) }
+                }
             }
-            if (mode == Mode.TIMELAPSE) PillBtn("${tlVals[tlIdx]}s", false) { tlIdx = (tlIdx + 1) % tlVals.size }
         }
 
         Column(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 16.dp),
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            if (mode == Mode.PRO) {
+            if (mode == Mode.PRO && !capturing) {
                 Column(
                     Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 8.dp)
                         .clip(RoundedCornerShape(16.dp)).background(Color(0xBB000000)).padding(10.dp)
@@ -753,7 +990,7 @@ fun CameraScreen() {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         wbNames.forEachIndexed { i, n ->
                             Text(
-                                n, color = if (proWb == i) Color(0xFFFFC107) else Color.White, fontSize = 12.sp,
+                                n, color = if (proWb == i) YELLOW else Color.White, fontSize = 12.sp,
                                 modifier = Modifier.clickable { proWb = i }.padding(6.dp)
                             )
                         }
@@ -765,7 +1002,7 @@ fun CameraScreen() {
                     if (ir != null && xr != null) {
                         Text(
                             "Exposure: ${if (proManualExp) "MANUAL" else "AUTO"}  (tap)",
-                            color = Color(0xFFFFC107), fontSize = 12.sp,
+                            color = YELLOW, fontSize = 12.sp,
                             modifier = Modifier.clickable { proManualExp = !proManualExp }.padding(vertical = 6.dp)
                         )
                         if (proManualExp) {
@@ -778,7 +1015,7 @@ fun CameraScreen() {
                     if (minFocus > 0f) {
                         Text(
                             "Focus: ${if (proManualFocus) "MANUAL" else "AUTO"}  (tap)",
-                            color = Color(0xFFFFC107), fontSize = 12.sp,
+                            color = YELLOW, fontSize = 12.sp,
                             modifier = Modifier.clickable { proManualFocus = !proManualFocus }.padding(vertical = 6.dp)
                         )
                         if (proManualFocus) ProSlider("Far / Near", proFocusF, 0f..1f) { proFocusF = it }
@@ -788,86 +1025,97 @@ fun CameraScreen() {
                 }
             }
 
-            if (showMore) {
+            if (maxZoom - minZoom > 0.05f) {
                 Row(
-                    Modifier.padding(bottom = 10.dp).clip(RoundedCornerShape(50))
-                        .background(Color(0x33FFFFFF)).padding(horizontal = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    Modifier.fillMaxWidth().padding(horizontal = 28.dp).padding(bottom = 6.dp)
+                        .clip(RoundedCornerShape(50)).background(Color(0x55000000)).padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    extraModes.forEach { m ->
-                        PillBtn(m.label, mode == m) {
-                            if (!busy) {
-                                mode = m
-                                showMore = false
+                    Text("%.1fx".format(zoom), color = Color.White, fontSize = 12.sp, modifier = Modifier.width(40.dp))
+                    Slider(
+                        value = zoom.coerceIn(minZoom, maxZoom),
+                        onValueChange = { zoom = it },
+                        valueRange = minZoom..maxZoom,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color.White,
+                            activeTrackColor = Color.White,
+                            inactiveTrackColor = Color(0x55FFFFFF)
+                        ),
+                        modifier = Modifier.weight(1f).height(28.dp)
+                    )
+                }
+            }
+
+            if (!capturing) {
+                val idx = modeOrder.indexOf(mode)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                    for (o in -1..1) {
+                        val j = idx + o
+                        Box(Modifier.width(110.dp), Alignment.Center) {
+                            if (j >= 0 && j < modeOrder.size) {
+                                val m = modeOrder[j]
+                                ModeLabel(m.label, o == 0) { selectMode(m) }
                             }
                         }
                     }
                 }
+            } else {
+                Spacer(Modifier.height(36.dp))
             }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(22.dp)) {
-                ModeLabel("PHOTO", mode == Mode.PHOTO) {
-                    if (!busy) {
-                        mode = Mode.PHOTO
-                        showMore = false
-                    }
-                }
-                ModeLabel("VIDEO", mode == Mode.VIDEO) {
-                    if (!busy) {
-                        mode = Mode.VIDEO
-                        showMore = false
-                    }
-                }
-                if (mode in extraModes) ModeLabel(mode.label, true) {}
-                ModeLabel("MORE", showMore) { showMore = !showMore }
-            }
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(10.dp))
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 40.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 36.dp),
                 horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    Modifier.size(48.dp).clip(CircleShape).background(Color(0x44FFFFFF)).clickable {
-                        try {
-                            ctx.startActivity(
-                                Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_GALLERY)
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (capturing) {
+                    Spacer(Modifier.size(52.dp))
+                } else {
+                    Box(
+                        Modifier.size(52.dp).clip(CircleShape).border(2.dp, Color.White, CircleShape)
+                            .background(Color(0x44FFFFFF)).clickable { openGallery() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        val t = thumb
+                        if (t != null) {
+                            Image(
+                                bitmap = t.asImageBitmap(), contentDescription = null,
+                                contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()
                             )
-                        } catch (e: Exception) {
-                            Toast.makeText(ctx, "No gallery app found", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Text("▣", color = Color.White, fontSize = 22.sp)
                         }
-                    },
-                    contentAlignment = Alignment.Center
-                ) { Text("▣", color = Color.White, fontSize = 22.sp) }
+                    }
+                }
 
                 if (mode == Mode.QR) {
-                    Spacer(Modifier.size(76.dp))
+                    Spacer(Modifier.size(78.dp))
                 } else {
-                    val active = recording != null || tlJob != null
                     Box(
-                        Modifier.size(76.dp).clip(CircleShape).border(4.dp, Color.White, CircleShape)
+                        Modifier.size(78.dp).clip(CircleShape).border(4.dp, Color.White, CircleShape)
                             .clickable { shutter() },
                         contentAlignment = Alignment.Center
                     ) {
-                        Box(
-                            Modifier
-                                .size(if (active) 30.dp else 60.dp)
-                                .clip(if (active) RoundedCornerShape(6.dp) else CircleShape)
-                                .background(if (mode == Mode.VIDEO || mode == Mode.TIMELAPSE) Color(0xFFE53935) else Color.White)
-                        )
+                        if (capturing) {
+                            Box(Modifier.size(28.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xFFE53935)))
+                        } else if (mode == Mode.VIDEO || mode == Mode.TIMELAPSE) {
+                            Box(Modifier.size(58.dp).clip(CircleShape).background(Color(0xFFE53935)))
+                        } else {
+                            Box(Modifier.size(62.dp).clip(CircleShape).background(Color.White))
+                        }
                     }
                 }
 
-                Box(
-                    Modifier.size(48.dp).clip(CircleShape).background(Color(0x44FFFFFF))
-                        .clickable {
-                            if (!busy) {
-                                camChoice = 0
-                                front = !front
-                            }
+                if (capturing) {
+                    Spacer(Modifier.size(52.dp))
+                } else {
+                    Box(
+                        Modifier.size(52.dp).clip(CircleShape).background(Color(0x44FFFFFF)).clickable {
+                            camChoice = 0
+                            front = !front
                         },
-                    contentAlignment = Alignment.Center
-                ) { Text("⟳", color = Color.White, fontSize = 24.sp) }
+                        contentAlignment = Alignment.Center
+                    ) { FlipIcon() }
+                }
             }
         }
 
@@ -911,6 +1159,10 @@ fun CameraScreen() {
                                 sdUri = null
                             }
                         }
+                        SettingRow("Gallery button opens", if (usePhotos) "Google Photos" else "Default gallery") {
+                            usePhotos = !usePhotos
+                            prefs.edit().putBoolean("photos", usePhotos).apply()
+                        }
                         SettingRow("Photo size", sizeNames[sizeIdx]) { sizeIdx = (sizeIdx + 1) % sizeNames.size }
                         SettingRow("Photo quality (JPEG)", jpegNames[jpegIdx]) { jpegIdx = (jpegIdx + 1) % jpegNames.size }
                         SettingRow("Video resolution", vqNames[vqIdx]) { vqIdx = (vqIdx + 1) % vqNames.size }
@@ -922,17 +1174,132 @@ fun CameraScreen() {
                         SettingRow("Volume keys = shutter", if (volShutter) "On" else "Off") { volShutter = !volShutter }
                         SettingRow("Save selfies as previewed", if (mirror) "On" else "Off") { mirror = !mirror }
                         SettingRow("Camera", if (camChoice == 0) "Auto" else "ID ${camIds[camChoice - 1]}") {
-                            if (!busy) camChoice = (camChoice + 1) % (camIds.size + 1)
+                            if (!capturing) camChoice = (camChoice + 1) % (camIds.size + 1)
                         }
                         SettingRow("Camera info (driver report)", "Open") { showInfo = true }
                         Spacer(Modifier.height(16.dp))
                         Text(
-                            "Tap a row to change it. Force 60fps sends a raw request that the driver may refuse; if the preview freezes, switch it off and reopen the app. Files saved to the SD card can take a moment to show in Gallery. Settings other than storage reset when the app closes.",
+                            "Tap a row to change it. Force 60fps sends a raw request that the driver may refuse; if the preview freezes, switch it off and reopen the app. Time-lapse is built from preview frames at the interval you pick and plays back at 30 fps.",
                             color = Color(0x99FFFFFF), fontSize = 13.sp
                         )
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun IconBox(onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
+    Box(
+        Modifier.defaultMinSize(44.dp, 44.dp).clip(CircleShape).clickable { onClick() },
+        contentAlignment = Alignment.Center,
+        content = content
+    )
+}
+
+@Composable
+fun GearIcon() {
+    Canvas(Modifier.size(24.dp)) {
+        val r = size.minDimension / 2
+        val ctr = center
+        val sw = r * 0.16f
+        drawCircle(Color.White, radius = r * 0.36f, center = ctr, style = Stroke(sw))
+        for (i in 0 until 8) {
+            val a = Math.toRadians(i * 45.0)
+            val dx = Math.cos(a).toFloat()
+            val dy = Math.sin(a).toFloat()
+            drawLine(
+                Color.White,
+                Offset(ctr.x + dx * r * 0.58f, ctr.y + dy * r * 0.58f),
+                Offset(ctr.x + dx * r * 0.88f, ctr.y + dy * r * 0.88f),
+                strokeWidth = sw * 1.6f, cap = StrokeCap.Round
+            )
+        }
+    }
+}
+
+@Composable
+fun FlashIcon(state: Int) {
+    val col = if (state == 0) Color.White else YELLOW
+    Box(contentAlignment = Alignment.Center) {
+        Canvas(Modifier.size(24.dp)) {
+            val w = size.width
+            val h = size.height
+            val p = Path()
+            p.moveTo(w * 0.60f, h * 0.05f)
+            p.lineTo(w * 0.22f, h * 0.56f)
+            p.lineTo(w * 0.46f, h * 0.56f)
+            p.lineTo(w * 0.38f, h * 0.95f)
+            p.lineTo(w * 0.78f, h * 0.40f)
+            p.lineTo(w * 0.54f, h * 0.40f)
+            p.close()
+            drawPath(p, col, style = Stroke(w * 0.08f))
+            if (state == 0) {
+                drawLine(Color.White, Offset(w * 0.1f, h * 0.9f), Offset(w * 0.9f, h * 0.1f), strokeWidth = w * 0.08f, cap = StrokeCap.Round)
+            }
+        }
+        if (state == 1) {
+            Text("A", color = col, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.BottomEnd))
+        }
+    }
+}
+
+@Composable
+fun TimerIcon(seconds: Int) {
+    val col = if (seconds == 0) Color.White else YELLOW
+    Box(contentAlignment = Alignment.Center) {
+        Canvas(Modifier.size(24.dp)) {
+            val r = size.minDimension / 2
+            val ctr = Offset(size.width / 2, size.height * 0.56f)
+            val sw = r * 0.14f
+            drawCircle(col, radius = r * 0.78f, center = ctr, style = Stroke(sw))
+            drawLine(col, Offset(size.width * 0.4f, size.height * 0.06f), Offset(size.width * 0.6f, size.height * 0.06f), strokeWidth = sw, cap = StrokeCap.Round)
+            drawLine(col, ctr, Offset(ctr.x + r * 0.3f, ctr.y - r * 0.35f), strokeWidth = sw, cap = StrokeCap.Round)
+        }
+        if (seconds > 0) {
+            Text("$seconds", color = col, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.BottomEnd))
+        }
+    }
+}
+
+@Composable
+fun TextIcon(label: String, active: Boolean) {
+    val col = if (active) YELLOW else Color.White
+    Box(Modifier.border(1.5.dp, col, RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 3.dp)) {
+        Text(label, color = col, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+fun FlipIcon() {
+    Canvas(Modifier.size(28.dp)) {
+        val r = size.minDimension * 0.34f
+        val ctr = center
+        val sw = size.minDimension * 0.08f
+        val head = size.minDimension * 0.16f
+        val topLeft = Offset(ctr.x - r, ctr.y - r)
+        val arcSize = androidx.compose.ui.geometry.Size(r * 2, r * 2)
+        for (k in 0..1) {
+            val start = 200f + 180f * k
+            val sweep = 130f
+            drawArc(
+                color = Color.White, startAngle = start, sweepAngle = sweep, useCenter = false,
+                topLeft = topLeft, size = arcSize, style = Stroke(width = sw, cap = StrokeCap.Round)
+            )
+            val a = Math.toRadians((start + sweep).toDouble())
+            val nx = Math.cos(a).toFloat()
+            val ny = Math.sin(a).toFloat()
+            val px = ctr.x + r * nx
+            val py = ctr.y + r * ny
+            val tx = -ny
+            val ty = nx
+            val path = Path()
+            path.moveTo(px + tx * head, py + ty * head)
+            path.lineTo(px + nx * head * 0.7f, py + ny * head * 0.7f)
+            path.lineTo(px - nx * head * 0.7f, py - ny * head * 0.7f)
+            path.close()
+            drawPath(path, Color.White)
         }
     }
 }
@@ -952,16 +1319,8 @@ fun SettingRow(label: String, value: String, onClick: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(label, color = Color.White, fontSize = 16.sp)
-        Text(value, color = Color(0xFFFFC107), fontSize = 16.sp)
+        Text(value, color = YELLOW, fontSize = 16.sp)
     }
-}
-
-@Composable
-fun PillBtn(label: String, active: Boolean, onClick: () -> Unit) {
-    Text(
-        label, color = if (active) Color(0xFFFFC107) else Color.White, fontSize = 13.sp,
-        modifier = Modifier.clickable { onClick() }.padding(horizontal = 9.dp, vertical = 10.dp)
-    )
 }
 
 @Composable
@@ -972,8 +1331,8 @@ fun TopBtn(label: String, onClick: () -> Unit) {
 @Composable
 fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit) {
     Text(
-        label, color = if (selected) Color(0xFFFFC107) else Color(0xAAFFFFFF),
-        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal, fontSize = 12.sp,
-        modifier = Modifier.clickable { onClick() }.padding(6.dp)
+        label, color = if (selected) YELLOW else Color(0xCCFFFFFF),
+        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal, fontSize = 14.sp,
+        modifier = Modifier.clickable { onClick() }.padding(8.dp)
     )
 }
