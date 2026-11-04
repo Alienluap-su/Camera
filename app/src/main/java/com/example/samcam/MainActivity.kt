@@ -12,10 +12,14 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
 import android.graphics.Rect
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.media.ImageReader
 import android.media.MediaActionSound
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -23,11 +27,16 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaRecorder
 import android.net.Uri
+import android.net.wifi.WifiManager
+import android.net.wifi.WifiNetworkSuggestion
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Range
 import android.util.Size
 import android.view.KeyEvent
@@ -65,6 +74,7 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
@@ -74,14 +84,18 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
@@ -103,27 +117,33 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -131,6 +151,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -138,6 +159,8 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 enum class Mode(val label: String) {
     PRO("Pro"), PHOTO("Photo"), VIDEO("Video"), TIMELAPSE("Time-lapse"), QR("QR scan")
@@ -150,6 +173,10 @@ object Bus {
     var volMode = 0
 }
 
+class QrResult(val text: String, val ssid: String?, val pass: String?, val wifiType: Int, val hidden: Boolean)
+
+class ProbeRes(val fps: Double, val msg: String)
+
 val YELLOW = Color(0xFFFFC107)
 val sizeNames = listOf("Max", "8M", "3M")
 val sizeLong = listOf(0, 3264, 2048)
@@ -159,6 +186,9 @@ val vqNames = listOf("4K", "1080p", "720p", "480p")
 val vqVals = listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD)
 val fpsVals = listOf(24, 30, 60)
 val tlVals = listOf(1, 2, 5, 10)
+val timerVals = listOf(0, 2, 5, 10)
+val brNames = listOf("Auto", "20 Mbps", "35 Mbps", "50 Mbps")
+val brVals = listOf(0, 20_000_000, 35_000_000, 50_000_000)
 val volNames = listOf("Shutter", "Zoom", "Off")
 val wbNames = listOf("AUTO", "DAY", "CLOUD", "TUNG", "FLUO")
 val wbVals = listOf(
@@ -175,6 +205,46 @@ fun fmtTime(s: Long): String {
     val m = (s % 3600) / 60
     val sec = s % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%02d:%02d".format(m, sec)
+}
+
+fun copyText(ctx: Context, text: String) {
+    (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+        .setPrimaryClip(ClipData.newPlainText("camera", text))
+}
+
+fun connectWifi(ctx: Context, ssid: String, pass: String?, type: Int, hidden: Boolean): String {
+    try {
+        if (type == 3) {
+            if (!pass.isNullOrEmpty()) copyText(ctx, pass)
+            ctx.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return "WEP can't be added by apps. Password copied; pick \"$ssid\" in Wi-Fi settings."
+        }
+        val b = WifiNetworkSuggestion.Builder().setSsid(ssid)
+        if (type != 1 && !pass.isNullOrEmpty()) b.setWpa2Passphrase(pass)
+        if (hidden) b.setIsHiddenSsid(true)
+        val sug = b.build()
+        if (Build.VERSION.SDK_INT >= 30) {
+            val i = Intent(Settings.ACTION_WIFI_ADD_NETWORKS)
+            i.putParcelableArrayListExtra(Settings.EXTRA_WIFI_NETWORK_LIST, arrayListOf(sug))
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            ctx.startActivity(i)
+            return "Tap Save in the Wi-Fi prompt to join \"$ssid\""
+        }
+        val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val st = wm.addNetworkSuggestions(listOf(sug))
+        return if (st == WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS) {
+            "Network \"$ssid\" suggested. Android will connect when it is in range."
+        } else {
+            "Android refused the network suggestion (code $st)."
+        }
+    } catch (e: Exception) {
+        if (!pass.isNullOrEmpty()) copyText(ctx, pass)
+        try {
+            ctx.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (x: Exception) {
+        }
+        return "Couldn't add it automatically. Password copied; choose \"$ssid\" in Wi-Fi settings."
+    }
 }
 
 fun treeRoot(tree: Uri): Uri =
@@ -309,6 +379,105 @@ class TimelapseEncoder(val w: Int, val h: Int, private val pfd: ParcelFileDescri
     }
 }
 
+@SuppressLint("MissingPermission")
+suspend fun probeOnce(ctx: Context, camId: String, fps: Int): ProbeRes {
+    val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    val map = try {
+        cm.getCameraCharacteristics(camId).get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+    } catch (e: Exception) {
+        null
+    }
+    if (map == null) return ProbeRes(-1.0, "no stream map")
+    val sizes = map.getOutputSizes(ImageFormat.YUV_420_888)
+    if (sizes == null || sizes.isEmpty()) return ProbeRes(-1.0, "no YUV sizes")
+    val size = sizes.firstOrNull { it.width == 1920 && it.height == 1080 }
+        ?: sizes.filter { it.width <= 1920 }.maxByOrNull { it.width * it.height }
+        ?: sizes[0]
+
+    val thread = HandlerThread("fpsprobe")
+    thread.start()
+    val handler = Handler(thread.looper)
+    val stamps = ArrayList<Long>()
+    val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 5)
+    reader.setOnImageAvailableListener({ r ->
+        try {
+            val img = r.acquireNextImage()
+            if (img != null) {
+                synchronized(stamps) { stamps.add(img.timestamp) }
+                img.close()
+            }
+        } catch (e: Exception) {
+        }
+    }, handler)
+
+    var device: CameraDevice? = null
+    var session: CameraCaptureSession? = null
+    var res = ProbeRes(-1.0, "unknown")
+    try {
+        val opened = CompletableDeferred<CameraDevice?>()
+        cm.openCamera(camId, object : CameraDevice.StateCallback() {
+            override fun onOpened(camera: CameraDevice) {
+                opened.complete(camera)
+            }
+
+            override fun onDisconnected(camera: CameraDevice) {
+                camera.close()
+                opened.complete(null)
+            }
+
+            override fun onError(camera: CameraDevice, error: Int) {
+                camera.close()
+                opened.complete(null)
+            }
+        }, handler)
+        val dev = withTimeoutOrNull(4000L) { opened.await() }
+        if (dev == null) {
+            res = ProbeRes(-1.0, "camera did not open")
+        } else {
+            device = dev
+            val ready = CompletableDeferred<CameraCaptureSession?>()
+            dev.createCaptureSession(listOf(reader.surface), object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(s: CameraCaptureSession) {
+                    ready.complete(s)
+                }
+
+                override fun onConfigureFailed(s: CameraCaptureSession) {
+                    ready.complete(null)
+                }
+            }, handler)
+            val sess = withTimeoutOrNull(4000L) { ready.await() }
+            if (sess == null) {
+                res = ProbeRes(-1.0, "session failed at ${size.width}x${size.height}")
+            } else {
+                session = sess
+                val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+                req.addTarget(reader.surface)
+                req.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
+                sess.setRepeatingRequest(req.build(), null, handler)
+                delay(2600)
+                val list = synchronized(stamps) { ArrayList(stamps) }
+                if (list.size < 20) {
+                    res = ProbeRes(-1.0, "only ${list.size} frames arrived")
+                } else {
+                    val s = list.subList(8, list.size)
+                    val span = (s[s.size - 1] - s[0]) / 1e9
+                    val f = (s.size - 1) / span
+                    res = ProbeRes(f, "%.1f fps at %dx%d".format(f, size.width, size.height))
+                }
+            }
+        }
+    } catch (e: Exception) {
+        if (e is CancellationException) throw e
+        res = ProbeRes(-1.0, "error: ${e.message}")
+    } finally {
+        try { session?.close() } catch (e: Exception) {}
+        try { device?.close() } catch (e: Exception) {}
+        try { reader.close() } catch (e: Exception) {}
+        try { thread.quitSafely() } catch (e: Exception) {}
+    }
+    return res
+}
+
 fun cameraReport(ctx: Context): String {
     val sb = StringBuilder("Device: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}\n\n")
     val capNames = mapOf(1 to "MANUAL_SENSOR", 2 to "MANUAL_POST", 3 to "RAW", 6 to "BURST", 9 to "HIGH_SPEED", 11 to "LOGICAL_MULTI")
@@ -374,21 +543,31 @@ class MainActivity : ComponentActivity() {
 fun LogoMark(dp: Dp) {
     Canvas(Modifier.size(dp)) {
         val w = this.size.width
-        val dark = Color(0xFF1F2937)
-        drawRoundRect(dark, cornerRadius = CornerRadius(w * 0.22f))
+        val tint = Color(0xFFEC4A5C)
         drawRoundRect(
-            Color.White, topLeft = Offset(w * 0.17f, w * 0.35f),
-            size = androidx.compose.ui.geometry.Size(w * 0.66f, w * 0.44f), cornerRadius = CornerRadius(w * 0.07f)
+            brush = Brush.linearGradient(
+                colors = listOf(Color(0xFFFF8A3D), Color(0xFFE8325C)),
+                start = Offset(0f, 0f),
+                end = Offset(w, w)
+            ),
+            cornerRadius = CornerRadius(w * 0.22f)
         )
         drawRoundRect(
-            Color.White, topLeft = Offset(w * 0.39f, w * 0.28f),
-            size = androidx.compose.ui.geometry.Size(w * 0.22f, w * 0.1f), cornerRadius = CornerRadius(w * 0.02f)
+            Color.White, topLeft = Offset(w * 0.19f, w * 0.36f),
+            size = androidx.compose.ui.geometry.Size(w * 0.62f, w * 0.42f), cornerRadius = CornerRadius(w * 0.08f)
         )
+        val bump = Path()
+        bump.moveTo(w * 0.39f, w * 0.36f)
+        bump.lineTo(w * 0.42f, w * 0.29f)
+        bump.lineTo(w * 0.58f, w * 0.29f)
+        bump.lineTo(w * 0.61f, w * 0.36f)
+        bump.close()
+        drawPath(bump, Color.White)
         val c = Offset(w * 0.5f, w * 0.57f)
-        drawCircle(dark, radius = w * 0.15f, center = c)
-        drawCircle(Color(0xFF4F8CFF), radius = w * 0.105f, center = c)
-        drawCircle(Color.White, radius = w * 0.03f, center = Offset(w * 0.465f, w * 0.52f))
-        drawCircle(YELLOW, radius = w * 0.028f, center = Offset(w * 0.71f, w * 0.43f))
+        drawCircle(tint, radius = w * 0.14f, center = c)
+        drawCircle(Color.White, radius = w * 0.093f, center = c)
+        drawCircle(tint, radius = w * 0.065f, center = c)
+        drawCircle(tint, radius = w * 0.023f, center = Offset(w * 0.69f, w * 0.44f))
     }
 }
 
@@ -449,8 +628,24 @@ fun CameraScreen() {
             emptyList<String>()
         }
     }
+    val rearId = remember {
+        var found: String? = null
+        try {
+            val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            for (c in cm.cameraIdList) {
+                if (cm.getCameraCharacteristics(c).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK) {
+                    found = c
+                    break
+                }
+            }
+        } catch (e: Exception) {
+        }
+        found
+    }
     val prefs = remember { ctx.getSharedPreferences("samcam", Context.MODE_PRIVATE) }
     val modeOrder = remember { Mode.values().toList() }
+    val itemW = 96.dp
+    val itemPx = with(LocalDensity.current) { itemW.toPx() }
 
     var sdUri by remember {
         mutableStateOf<Uri?>(
@@ -474,8 +669,15 @@ fun CameraScreen() {
         }
     }
 
-    var mode by remember { mutableStateOf(Mode.PHOTO) }
-    var front by remember { mutableStateOf(false) }
+    var mode by remember {
+        mutableStateOf(
+            if (prefs.getBoolean("remember", false)) modeOrder.getOrElse(prefs.getInt("lastmode", 1)) { Mode.PHOTO }
+            else Mode.PHOTO
+        )
+    }
+    var modePos by remember { mutableFloatStateOf(modeOrder.indexOf(mode).toFloat()) }
+    var modeAnim by remember { mutableStateOf<Job?>(null) }
+    var front by remember { mutableStateOf(prefs.getBoolean("deffront", false)) }
     var camChoice by remember { mutableIntStateOf(0) }
     var ratio43 by remember { mutableStateOf(prefs.getBoolean("r43", true)) }
     var flash by remember { mutableIntStateOf(0) }
@@ -486,6 +688,7 @@ fun CameraScreen() {
     var jpegIdx by remember { mutableIntStateOf(prefs.getInt("jpeg", 1)) }
     var vqIdx by remember { mutableIntStateOf(prefs.getInt("vq", 1)) }
     var fpsIdx by remember { mutableIntStateOf(prefs.getInt("fps", 1)) }
+    var brIdx by remember { mutableIntStateOf(prefs.getInt("br", 0)) }
     var tlIdx by remember { mutableIntStateOf(prefs.getInt("tl", 1)) }
     var mic by remember { mutableStateOf(prefs.getBoolean("mic", true)) }
     var grid by remember { mutableStateOf(prefs.getBoolean("grid", false)) }
@@ -497,13 +700,19 @@ fun CameraScreen() {
     var vibrate by remember { mutableStateOf(prefs.getBoolean("vibe", true)) }
     var tapFocus by remember { mutableStateOf(prefs.getBoolean("tap", true)) }
     var keepOn by remember { mutableStateOf(prefs.getBoolean("keep", true)) }
+    var flashAnim by remember { mutableStateOf(prefs.getBoolean("flashanim", true)) }
+    var showZoom by remember { mutableStateOf(prefs.getBoolean("showzoom", true)) }
+    var defFront by remember { mutableStateOf(prefs.getBoolean("deffront", false)) }
+    var rememberMode by remember { mutableStateOf(prefs.getBoolean("remember", false)) }
+    var autoWifi by remember { mutableStateOf(prefs.getBoolean("autowifi", true)) }
     var showSettings by remember { mutableStateOf(false) }
     var showInfo by remember { mutableStateOf(false) }
-    var qr by remember { mutableStateOf<String?>(null) }
+    var qr by remember { mutableStateOf<QrResult?>(null) }
     var tlOn by remember { mutableStateOf(false) }
     var tlJob by remember { mutableStateOf<Job?>(null) }
     var tlCount by remember { mutableIntStateOf(0) }
     var recording by remember { mutableStateOf<Recording?>(null) }
+    var paused by remember { mutableStateOf(false) }
     var camera by remember { mutableStateOf<Camera?>(null) }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var videoCapture by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
@@ -511,12 +720,19 @@ fun CameraScreen() {
     var minZoom by remember { mutableFloatStateOf(1f) }
     var maxZoom by remember { mutableFloatStateOf(1f) }
     var elapsed by remember { mutableLongStateOf(0L) }
+    var accMs by remember { mutableLongStateOf(0L) }
     var lastUri by remember { mutableStateOf<Uri?>(prefs.getString("last_uri", null)?.let { Uri.parse(it) }) }
     var lastMime by remember { mutableStateOf(prefs.getString("last_mime", "image/jpeg") ?: "image/jpeg") }
     var thumb by remember { mutableStateOf<Bitmap?>(null) }
     var focusPos by remember { mutableStateOf<Offset?>(null) }
     var focusTick by remember { mutableIntStateOf(0) }
-    val focusAnim = remember { Animatable(1f) }
+    val focusAnimV = remember { Animatable(1f) }
+    val switchAlpha = remember { Animatable(0f) }
+    val shutterAnim = remember { Animatable(0f) }
+    var screenFlash by remember { mutableStateOf(false) }
+    var camPaused by remember { mutableStateOf(false) }
+    var probeRunning by remember { mutableStateOf(false) }
+    var probeResult by remember { mutableStateOf("") }
 
     var proWb by remember { mutableIntStateOf(0) }
     var ev by remember { mutableIntStateOf(0) }
@@ -546,6 +762,10 @@ fun CameraScreen() {
         targetValue = zoomTarget,
         animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
         label = "zoom"
+    )
+    val arAnim by animateFloatAsState(
+        targetValue = if (use43) 0.75f else 0.5625f,
+        animationSpec = tween(300), label = "ar"
     )
 
     fun toast(s: String) {
@@ -577,13 +797,23 @@ fun CameraScreen() {
 
     SideEffect { Bus.volMode = volMode }
 
-    LaunchedEffect(sizeIdx, jpegIdx, vqIdx, fpsIdx, tlIdx, mic, grid, volMode, mirror, forceFps, usePhotos, shutterSound, vibrate, tapFocus, keepOn, ratio43) {
+    LaunchedEffect(
+        sizeIdx, jpegIdx, vqIdx, fpsIdx, brIdx, tlIdx, mic, grid, volMode, mirror, forceFps, usePhotos,
+        shutterSound, vibrate, tapFocus, keepOn, ratio43, flashAnim, showZoom, defFront, rememberMode, autoWifi
+    ) {
         prefs.edit()
-            .putInt("size", sizeIdx).putInt("jpeg", jpegIdx).putInt("vq", vqIdx).putInt("fps", fpsIdx).putInt("tl", tlIdx)
+            .putInt("size", sizeIdx).putInt("jpeg", jpegIdx).putInt("vq", vqIdx).putInt("fps", fpsIdx)
+            .putInt("br", brIdx).putInt("tl", tlIdx)
             .putBoolean("mic", mic).putBoolean("grid", grid).putInt("vol", volMode).putBoolean("mirror", mirror)
             .putBoolean("force", forceFps).putBoolean("photos", usePhotos).putBoolean("sound", shutterSound)
             .putBoolean("vibe", vibrate).putBoolean("tap", tapFocus).putBoolean("keep", keepOn).putBoolean("r43", ratio43)
+            .putBoolean("flashanim", flashAnim).putBoolean("showzoom", showZoom).putBoolean("deffront", defFront)
+            .putBoolean("remember", rememberMode).putBoolean("autowifi", autoWifi)
             .apply()
+    }
+
+    LaunchedEffect(mode) {
+        prefs.edit().putInt("lastmode", modeOrder.indexOf(mode)).apply()
     }
 
     LaunchedEffect(keepOn) {
@@ -598,27 +828,45 @@ fun CameraScreen() {
 
     LaunchedEffect(capturing) {
         if (capturing) {
-            val t0 = System.currentTimeMillis()
+            accMs = 0L
+            var last = System.currentTimeMillis()
             while (true) {
-                elapsed = (System.currentTimeMillis() - t0) / 1000
-                delay(250)
+                delay(200)
+                val now = System.currentTimeMillis()
+                if (!paused) accMs += now - last
+                last = now
+                elapsed = accMs / 1000
             }
         } else {
             elapsed = 0L
+            accMs = 0L
+            paused = false
         }
     }
 
     LaunchedEffect(focusTick) {
         if (focusTick > 0) {
-            focusAnim.snapTo(0f)
-            focusAnim.animateTo(1f, tween(800))
+            focusAnimV.snapTo(0f)
+            focusAnimV.animateTo(1f, tween(800))
         }
     }
 
-    LaunchedEffect(mode, front, camChoice, ratio43, sizeIdx, jpegIdx, vqIdx, fpsIdx) {
+    LaunchedEffect(mode, front, camChoice, ratio43) {
+        switchAlpha.snapTo(0.9f)
+        switchAlpha.animateTo(0f, tween(550))
+    }
+
+    LaunchedEffect(mode, front, camChoice, ratio43, sizeIdx, jpegIdx, vqIdx, fpsIdx, brIdx, camPaused) {
         val provider = suspendCoroutine<ProcessCameraProvider> { c ->
             val f = ProcessCameraProvider.getInstance(ctx)
             f.addListener({ c.resume(f.get()) }, exec)
+        }
+        if (camPaused) {
+            provider.unbindAll()
+            camera = null
+            imageCapture = null
+            videoCapture = null
+            return@LaunchedEffect
         }
         val aspect = if (use43) AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
         else AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
@@ -662,9 +910,11 @@ fun CameraScreen() {
                 var vc: VideoCapture<Recorder>? = null
                 if (mode == Mode.VIDEO) {
                     val q = vqVals[vqIdx]
-                    val rec = Recorder.Builder()
+                    val rb = Recorder.Builder()
                         .setQualitySelector(QualitySelector.from(q, FallbackStrategy.lowerQualityOrHigherThan(q)))
-                        .build()
+                    val vb = brVals[brIdx]
+                    if (vb > 0) rb.setTargetVideoEncodingBitRate(vb)
+                    val rec = rb.build()
                     val fps = fpsVals[fpsIdx]
                     val vcBuilder = VideoCapture.Builder(rec)
                     if (fps != 30) vcBuilder.setTargetFrameRate(Range(fps, fps))
@@ -681,8 +931,24 @@ fun CameraScreen() {
                             val img = InputImage.fromBitmap(bmp, proxy.imageInfo.rotationDegrees)
                             scanner.process(img)
                                 .addOnSuccessListener { list ->
-                                    val v = list.firstOrNull()?.rawValue
-                                    if (v != null && qr == null) qr = v
+                                    val b = list.firstOrNull()
+                                    if (b != null && qr == null) {
+                                        val raw = b.rawValue ?: b.displayValue ?: ""
+                                        val w = if (b.valueType == Barcode.TYPE_WIFI) b.wifi else null
+                                        val ssid = w?.ssid
+                                        val r = QrResult(
+                                            raw,
+                                            if (ssid.isNullOrEmpty()) null else ssid,
+                                            w?.password,
+                                            w?.encryptionType ?: 2,
+                                            raw.contains("H:true", ignoreCase = true)
+                                        )
+                                        qr = r
+                                        buzz()
+                                        if (r.ssid != null && prefs.getBoolean("autowifi", true)) {
+                                            toast(connectWifi(ctx, r.ssid, r.pass, r.wifiType, r.hidden))
+                                        }
+                                    }
                                 }
                                 .addOnCompleteListener { proxy.close() }
                         } catch (e: Exception) {
@@ -751,7 +1017,7 @@ fun CameraScreen() {
                 val ranges = c2i.getCameraCharacteristic(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
                 val offered = ranges != null && ranges.any { it.upper >= want }
                 if (!offered) {
-                    toast("${want}fps is not offered by this camera driver. Turn on Force 60fps in Settings to try anyway.")
+                    toast("${want}fps is not offered by this camera driver. Run the 60 fps test in Camera info.")
                 }
             }
         } catch (e: Exception) {
@@ -844,6 +1110,12 @@ fun CameraScreen() {
         val ic = imageCapture ?: return
         snd(MediaActionSound.SHUTTER_CLICK)
         buzz()
+        if (flashAnim) {
+            scope.launch {
+                shutterAnim.snapTo(0.65f)
+                shutterAnim.animateTo(0f, tween(220))
+            }
+        }
         val meta = ImageCapture.Metadata()
         meta.isReversedHorizontal = front && mirror
         val tree = sdUri
@@ -882,12 +1154,24 @@ fun CameraScreen() {
         })
     }
 
+    fun togglePause() {
+        val r = recording ?: return
+        if (paused) {
+            r.resume()
+            paused = false
+        } else {
+            r.pause()
+            paused = true
+        }
+    }
+
     fun toggleRecord() {
         val active = recording
         if (active != null) {
             snd(MediaActionSound.STOP_VIDEO_RECORDING)
             active.stop()
             recording = null
+            paused = false
             return
         }
         val vc = videoCapture ?: return
@@ -902,6 +1186,7 @@ fun CameraScreen() {
         recording = pending.start(exec) { evt ->
             if (evt is VideoRecordEvent.Finalize) {
                 recording = null
+                paused = false
                 try {
                     out.pfd.close()
                 } catch (e: Exception) {
@@ -997,7 +1282,17 @@ fun CameraScreen() {
                     buzz()
                     startTimelapse()
                 }
-                else -> takePhoto()
+                else -> {
+                    if (front && flash != 0) {
+                        screenFlash = true
+                        delay(350)
+                        takePhoto()
+                        delay(300)
+                        screenFlash = false
+                    } else {
+                        takePhoto()
+                    }
+                }
             }
         }
     }
@@ -1035,18 +1330,28 @@ fun CameraScreen() {
         }
     }
 
+    fun animateModePos(target: Int) {
+        modeAnim?.cancel()
+        modeAnim = scope.launch {
+            Animatable(modePos).animateTo(
+                target.toFloat(),
+                spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow)
+            ) { modePos = value }
+        }
+    }
+
     fun selectMode(m: Mode) {
-        if (!capturing && countdown == 0 && m != mode) {
+        if (capturing || countdown > 0) {
+            animateModePos(modeOrder.indexOf(mode))
+            return
+        }
+        if (m != mode) {
             qr = null
             torch = false
             mode = m
             buzz()
         }
-    }
-
-    fun swipeMode(dir: Int) {
-        val i = modeOrder.indexOf(mode) + dir
-        if (i >= 0 && i < modeOrder.size) selectMode(modeOrder[i])
+        animateModePos(modeOrder.indexOf(m))
     }
 
     fun resetAll() {
@@ -1055,6 +1360,7 @@ fun CameraScreen() {
         jpegIdx = 1
         vqIdx = 1
         fpsIdx = 1
+        brIdx = 0
         tlIdx = 1
         mic = true
         grid = false
@@ -1067,7 +1373,18 @@ fun CameraScreen() {
         tapFocus = true
         keepOn = true
         ratio43 = true
+        flashAnim = true
+        showZoom = true
+        defFront = false
+        rememberMode = false
+        autoWifi = true
         sdUri = null
+    }
+
+    val modeDrag = rememberDraggableState { dx ->
+        if (!capturing && countdown == 0) {
+            modePos = (modePos - dx / itemPx).coerceIn(0f, (modeOrder.size - 1).toFloat())
+        }
     }
 
     LaunchedEffect(Bus.tick) { if (Bus.tick > 0) shutter() }
@@ -1079,7 +1396,7 @@ fun CameraScreen() {
     Box(Modifier.fillMaxSize().background(Color.Black).systemBarsPadding()) {
         Box(
             Modifier.align(Alignment.TopCenter).padding(top = 56.dp).fillMaxWidth()
-                .aspectRatio(if (use43) 3f / 4f else 9f / 16f)
+                .aspectRatio(arAnim)
                 .pointerInput(tapFocus) {
                     detectTapGestures { o ->
                         if (tapFocus) {
@@ -1106,8 +1423,28 @@ fun CameraScreen() {
                     drawLine(c, Offset(0f, size.height * 2 / 3), Offset(size.width, size.height * 2 / 3), 1f)
                 }
             }
+            if (mode == Mode.QR && qr == null) {
+                Canvas(Modifier.fillMaxSize()) {
+                    val s = size.minDimension * 0.62f
+                    val l = Offset((size.width - s) / 2, (size.height - s) / 2)
+                    val len = s * 0.16f
+                    val c = Color.White
+                    val sw = 7f
+                    drawLine(c, l, Offset(l.x + len, l.y), strokeWidth = sw, cap = StrokeCap.Round)
+                    drawLine(c, l, Offset(l.x, l.y + len), strokeWidth = sw, cap = StrokeCap.Round)
+                    val r = Offset(l.x + s, l.y)
+                    drawLine(c, r, Offset(r.x - len, r.y), strokeWidth = sw, cap = StrokeCap.Round)
+                    drawLine(c, r, Offset(r.x, r.y + len), strokeWidth = sw, cap = StrokeCap.Round)
+                    val bl = Offset(l.x, l.y + s)
+                    drawLine(c, bl, Offset(bl.x + len, bl.y), strokeWidth = sw, cap = StrokeCap.Round)
+                    drawLine(c, bl, Offset(bl.x, bl.y - len), strokeWidth = sw, cap = StrokeCap.Round)
+                    val br = Offset(l.x + s, l.y + s)
+                    drawLine(c, br, Offset(br.x - len, br.y), strokeWidth = sw, cap = StrokeCap.Round)
+                    drawLine(c, br, Offset(br.x, br.y - len), strokeWidth = sw, cap = StrokeCap.Round)
+                }
+            }
             val fp = focusPos
-            val fv = focusAnim.value
+            val fv = focusAnimV.value
             if (fp != null && fv < 1f) {
                 Canvas(Modifier.fillMaxSize()) {
                     val a = if (fv < 0.7f) 1f else 1f - (fv - 0.7f) / 0.3f
@@ -1118,27 +1455,55 @@ fun CameraScreen() {
             if (countdown > 0) {
                 Text("$countdown", Modifier.align(Alignment.Center), color = Color.White, fontSize = 96.sp)
             }
-            val qrText = qr
-            if (qrText != null) {
+            if (switchAlpha.value > 0.01f) {
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = switchAlpha.value)))
+            }
+            if (shutterAnim.value > 0.01f) {
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = shutterAnim.value)))
+            }
+            val q = qr
+            if (q != null) {
                 Column(
                     Modifier.align(Alignment.BottomCenter).padding(12.dp)
-                        .clip(RoundedCornerShape(16.dp)).background(Color(0xDD000000)).padding(14.dp)
+                        .clip(RoundedCornerShape(16.dp)).background(Color(0xE6000000)).padding(14.dp)
                 ) {
-                    Text(qrText, color = Color.White, fontSize = 14.sp, maxLines = 4)
-                    Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        PressBox({
-                            (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                                .setPrimaryClip(ClipData.newPlainText("qr", qrText))
-                            Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
-                        }, Modifier.padding(2.dp)) { Text("Copy", color = Color.White, modifier = Modifier.padding(10.dp, 6.dp)) }
-                        if (qrText.startsWith("http")) {
+                    if (q.ssid != null) {
+                        Text("Wi-Fi network", color = YELLOW, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(q.ssid, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (q.wifiType == 1) "Open network" else if (q.wifiType == 3) "WEP" else "WPA / WPA2",
+                            color = Color(0xB3FFFFFF), fontSize = 12.sp
+                        )
+                    } else {
+                        Text(q.text, color = Color.White, fontSize = 14.sp, maxLines = 4)
+                    }
+                    Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (q.ssid != null) {
                             PressBox({
-                                try {
-                                    ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(qrText)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                                } catch (e: Exception) {
-                                    Toast.makeText(ctx, "Can't open this link", Toast.LENGTH_SHORT).show()
-                                }
-                            }, Modifier.padding(2.dp)) { Text("Open", color = Color.White, modifier = Modifier.padding(10.dp, 6.dp)) }
+                                toast(connectWifi(ctx, q.ssid, q.pass, q.wifiType, q.hidden))
+                            }, Modifier.padding(2.dp), true) {
+                                Text("Connect", color = YELLOW, modifier = Modifier.padding(12.dp, 6.dp), fontWeight = FontWeight.Bold)
+                            }
+                            if (!q.pass.isNullOrEmpty()) {
+                                PressBox({
+                                    copyText(ctx, q.pass)
+                                    Toast.makeText(ctx, "Password copied", Toast.LENGTH_SHORT).show()
+                                }, Modifier.padding(2.dp)) { Text("Copy password", color = Color.White, modifier = Modifier.padding(10.dp, 6.dp)) }
+                            }
+                        } else {
+                            PressBox({
+                                copyText(ctx, q.text)
+                                Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
+                            }, Modifier.padding(2.dp)) { Text("Copy", color = Color.White, modifier = Modifier.padding(10.dp, 6.dp)) }
+                            if (q.text.startsWith("http")) {
+                                PressBox({
+                                    try {
+                                        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(q.text)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                                    } catch (e: Exception) {
+                                        Toast.makeText(ctx, "Can't open this link", Toast.LENGTH_SHORT).show()
+                                    }
+                                }, Modifier.padding(2.dp)) { Text("Open", color = Color.White, modifier = Modifier.padding(10.dp, 6.dp)) }
+                            }
                         }
                         PressBox({ qr = null }, Modifier.padding(2.dp)) {
                             Text("Close", color = Color.White, modifier = Modifier.padding(10.dp, 6.dp))
@@ -1155,15 +1520,24 @@ fun CameraScreen() {
         ) {
             Row(
                 Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000))
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(Modifier.size(10.dp).clip(CircleShape).background(Color(0xFFE53935)))
+                Box(Modifier.size(10.dp).clip(CircleShape).background(if (paused) YELLOW else Color(0xFFE53935)))
                 Spacer(Modifier.width(8.dp))
-                Text(fmtTime(elapsed), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    fmtTime(elapsed), color = if (paused) YELLOW else Color.White,
+                    fontSize = 18.sp, fontWeight = FontWeight.Bold
+                )
                 if (tlOn) {
                     Spacer(Modifier.width(10.dp))
                     Text("$tlCount frames", color = Color(0xCCFFFFFF), fontSize = 12.sp)
+                }
+                if (isRec) {
+                    Spacer(Modifier.width(8.dp))
+                    PressBox({ togglePause() }, Modifier.size(32.dp)) {
+                        Text(if (paused) "▶" else "❚❚", color = Color.White, fontSize = 12.sp)
+                    }
                 }
             }
         }
@@ -1173,56 +1547,57 @@ fun CameraScreen() {
             modifier = Modifier.align(Alignment.TopCenter),
             enter = fadeIn(), exit = fadeOut()
         ) {
-            Row(
-                Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconBox({ showSettings = true }, false) { GearIcon() }
-                if (mode != Mode.QR) {
-                    if (mode == Mode.VIDEO || mode == Mode.TIMELAPSE) {
-                        IconBox({ torch = !torch }, torch) { FlashIcon(if (torch) 2 else 0) }
-                    } else {
-                        IconBox({ flash = (flash + 1) % 3 }, flash != 0) { FlashIcon(flash) }
-                    }
-                    IconBox({
-                        timer = when (timer) {
-                            0 -> 3
-                            3 -> 10
-                            else -> 0
+            Crossfade(targetState = mode, animationSpec = tween(220), label = "topbar") { m ->
+                Row(
+                    Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconBox({ showSettings = true }, false) { GearIcon() }
+                    if (m != Mode.QR) {
+                        if (m == Mode.VIDEO || m == Mode.TIMELAPSE) {
+                            IconBox({ torch = !torch }, torch) { FlashIcon(if (torch) 2 else 0) }
+                        } else {
+                            IconBox({ flash = (flash + 1) % 3 }, flash != 0) { FlashIcon(flash) }
                         }
-                    }, timer != 0) { TimerIcon(timer) }
-                }
-                if (mode == Mode.PHOTO || mode == Mode.PRO || mode == Mode.TIMELAPSE) {
-                    IconBox({ ratio43 = !ratio43 }, false) { TextIcon(if (ratio43) "3:4" else "9:16", false) }
-                }
-                if (mode == Mode.PHOTO || mode == Mode.PRO) {
-                    IconBox({ sizeIdx = (sizeIdx + 1) % sizeNames.size }, false) { TextIcon(sizeNames[sizeIdx], false) }
-                }
-                if (mode == Mode.VIDEO) {
-                    IconBox({ vqIdx = (vqIdx + 1) % vqNames.size }, false) { TextIcon(vqNames[vqIdx], false) }
-                    IconBox({ fpsIdx = (fpsIdx + 1) % fpsVals.size }, forceFps && fpsVals[fpsIdx] > 30) {
-                        TextIcon("${fpsVals[fpsIdx]}fps", forceFps && fpsVals[fpsIdx] > 30)
+                        IconBox({
+                            timer = timerVals[(timerVals.indexOf(timer) + 1) % timerVals.size]
+                        }, timer != 0) { TimerIcon(timer) }
                     }
-                }
-                if (mode == Mode.TIMELAPSE) {
-                    IconBox({ tlIdx = (tlIdx + 1) % tlVals.size }, false) { TextIcon("${tlVals[tlIdx]}s", false) }
+                    if (m == Mode.PHOTO || m == Mode.PRO || m == Mode.TIMELAPSE) {
+                        IconBox({ ratio43 = !ratio43 }, false) { TextIcon(if (ratio43) "3:4" else "9:16", false) }
+                    }
+                    if (m == Mode.PHOTO || m == Mode.PRO) {
+                        IconBox({ sizeIdx = (sizeIdx + 1) % sizeNames.size }, false) { TextIcon(sizeNames[sizeIdx], false) }
+                    }
+                    if (m == Mode.VIDEO) {
+                        IconBox({ vqIdx = (vqIdx + 1) % vqNames.size }, false) { TextIcon(vqNames[vqIdx], false) }
+                        IconBox({ fpsIdx = (fpsIdx + 1) % fpsVals.size }, forceFps && fpsVals[fpsIdx] > 30) {
+                            TextIcon("${fpsVals[fpsIdx]}fps", forceFps && fpsVals[fpsIdx] > 30)
+                        }
+                    }
+                    if (m == Mode.TIMELAPSE) {
+                        IconBox({ tlIdx = (tlIdx + 1) % tlVals.size }, false) { TextIcon("${tlVals[tlIdx]}s", false) }
+                    }
                 }
             }
         }
 
         Column(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 12.dp)
-                .pointerInput(mode, capturing, countdown) {
-                    var acc = 0f
-                    detectHorizontalDragGestures(
-                        onDragStart = { acc = 0f },
-                        onDragEnd = {
-                            if (acc < -80f) swipeMode(1) else if (acc > 80f) swipeMode(-1)
-                            acc = 0f
-                        },
-                        onDragCancel = { acc = 0f }
-                    ) { _, dx -> acc += dx }
-                },
+                .draggable(
+                    state = modeDrag,
+                    orientation = Orientation.Horizontal,
+                    onDragStarted = { modeAnim?.cancel() },
+                    onDragStopped = { v ->
+                        if (capturing || countdown > 0) {
+                            animateModePos(modeOrder.indexOf(mode))
+                        } else {
+                            val proj = modePos - v / itemPx * 0.18f
+                            val t = proj.roundToInt().coerceIn(0, modeOrder.size - 1)
+                            selectMode(modeOrder[t])
+                        }
+                    }
+                ),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             AnimatedVisibility(visible = mode == Mode.PRO && !capturing) {
@@ -1265,7 +1640,7 @@ fun CameraScreen() {
                 }
             }
 
-            if (maxZoom - minZoom > 0.05f) {
+            if (showZoom && maxZoom - minZoom > 0.05f) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 28.dp).padding(bottom = 6.dp)
                         .clip(RoundedCornerShape(50)).background(Color(0x55000000)).padding(horizontal = 14.dp),
@@ -1287,7 +1662,7 @@ fun CameraScreen() {
             }
 
             AnimatedVisibility(visible = !capturing) {
-                ModeStrip(mode, modeOrder) { selectMode(it) }
+                ModeStrip(modePos, modeOrder, itemW) { selectMode(it) }
             }
             Spacer(Modifier.height(10.dp))
 
@@ -1335,7 +1710,15 @@ fun CameraScreen() {
             }
         }
 
-        AnimatedVisibility(visible = showSettings, enter = fadeIn(), exit = fadeOut()) {
+        if (screenFlash) {
+            Box(Modifier.fillMaxSize().background(Color.White))
+        }
+
+        AnimatedVisibility(
+            visible = showSettings,
+            enter = slideInHorizontally(animationSpec = tween(260)) { it } + fadeIn(),
+            exit = slideOutHorizontally(animationSpec = tween(220)) { it } + fadeOut()
+        ) {
             Box(Modifier.fillMaxSize().background(Color(0xFF0B0B0D)).clickable { }) {
                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 12.dp)) {
                     Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1350,11 +1733,39 @@ fun CameraScreen() {
                     }
                     if (showInfo) {
                         val report = remember { cameraReport(ctx) }
+                        OptionRow("Run 60 fps test (rear camera)", if (probeRunning) "Running…" else "Start") {
+                            val id = rearId
+                            if (id == null) {
+                                toast("No rear camera found")
+                            } else if (!probeRunning) {
+                                probeRunning = true
+                                camPaused = true
+                                probeResult = "Testing… keep the app open for about 10 seconds"
+                                scope.launch {
+                                    delay(800)
+                                    val a = probeOnce(ctx, id, 30)
+                                    delay(600)
+                                    val b = probeOnce(ctx, id, 60)
+                                    val verdict = if (b.fps >= 50.0) {
+                                        "RESULT: the driver DOES deliver about 60 fps in raw Camera2. Tell me and I will build a direct 60 fps recorder."
+                                    } else if (b.fps > 0.0) {
+                                        "RESULT: the driver stays near ${b.fps.toInt()} fps even in raw Camera2. This is a ROM / camera HAL limit that an app cannot change."
+                                    } else {
+                                        "RESULT: the 60 fps test could not run (${b.msg})."
+                                    }
+                                    probeResult = "Asked for 30 fps: ${a.msg}\nAsked for 60 fps: ${b.msg}\n\n$verdict"
+                                    camPaused = false
+                                    probeRunning = false
+                                }
+                            }
+                        }
+                        if (probeResult.isNotEmpty()) {
+                            Text(probeResult, color = Color.White, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp))
+                        }
                         Text(report, color = Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                         Spacer(Modifier.height(12.dp))
                         OptionRow("Copy report", "") {
-                            (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                                .setPrimaryClip(ClipData.newPlainText("camera", report))
+                            copyText(ctx, report + "\n" + probeResult)
                             Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
                         }
                     } else {
@@ -1363,11 +1774,13 @@ fun CameraScreen() {
                         OptionRow("Photo quality (JPEG)", jpegNames[jpegIdx]) { jpegIdx = (jpegIdx + 1) % jpegNames.size }
                         SwitchRow("Save selfies as previewed", "Keep the mirror image of front camera photos", mirror) { mirror = it }
                         SwitchRow("Grid lines", "Show a 3x3 grid in the viewfinder", grid) { grid = it }
+                        SwitchRow("Shutter flash animation", "Briefly dim the viewfinder when a photo is taken", flashAnim) { flashAnim = it }
 
                         SectionTitle("Videos")
                         OptionRow("Video resolution", vqNames[vqIdx]) { vqIdx = (vqIdx + 1) % vqNames.size }
                         OptionRow("Video frame rate", "${fpsVals[fpsIdx]} fps") { fpsIdx = (fpsIdx + 1) % fpsVals.size }
                         SwitchRow("Force 60 fps (experimental)", "Send a raw 60 fps request. Turn off if the preview freezes", forceFps) { forceFps = it }
+                        OptionRow("Video bitrate", brNames[brIdx]) { brIdx = (brIdx + 1) % brNames.size }
                         SwitchRow("Record audio", "Use the microphone when recording videos", mic) { mic = it }
                         OptionRow("Time-lapse interval", "${tlVals[tlIdx]} s") { tlIdx = (tlIdx + 1) % tlVals.size }
 
@@ -1377,6 +1790,10 @@ fun CameraScreen() {
                         SwitchRow("Shutter sound", "Play a sound when taking photos and videos", shutterSound) { shutterSound = it }
                         SwitchRow("Vibration feedback", "Vibrate when pressing the shutter and changing modes", vibrate) { vibrate = it }
                         SwitchRow("Keep screen on", "Prevent the screen from turning off while the camera is open", keepOn) { keepOn = it }
+                        SwitchRow("Show zoom slider", "Show the zoom bar above the mode strip", showZoom) { showZoom = it }
+                        SwitchRow("Start with front camera", "Open the app using the selfie camera", defFront) { defFront = it }
+                        SwitchRow("Remember last mode", "Open in the mode you used last", rememberMode) { rememberMode = it }
+                        SwitchRow("Auto-connect to Wi-Fi QR codes", "Open the Wi-Fi save prompt as soon as a Wi-Fi QR code is scanned", autoWifi) { autoWifi = it }
 
                         SectionTitle("Storage")
                         OptionRow("Storage location", if (sdUri == null) "Phone" else "Chosen folder") {
@@ -1395,7 +1812,7 @@ fun CameraScreen() {
                         OptionRow("Camera", if (camChoice == 0) "Auto" else "ID ${camIds[camChoice - 1]}") {
                             if (!capturing) camChoice = (camChoice + 1) % (camIds.size + 1)
                         }
-                        OptionRow("Camera info (driver report)", "Open") { showInfo = true }
+                        OptionRow("Camera info and 60 fps test", "Open") { showInfo = true }
                         OptionRow("Reset settings", "Reset") { resetAll() }
                         Spacer(Modifier.height(24.dp))
                     }
@@ -1468,15 +1885,30 @@ fun ModePill(label: String, selected: Boolean, modifier: Modifier, onClick: () -
 }
 
 @Composable
-fun ModeStrip(mode: Mode, order: List<Mode>, onSelect: (Mode) -> Unit) {
-    val idx = order.indexOf(mode)
-    BoxWithConstraints(Modifier.fillMaxWidth().height(42.dp).clipToBounds()) {
-        val itemW = 96.dp
-        val target = (maxWidth - itemW) / 2 - itemW * idx
-        val off by animateDpAsState(targetValue = target, animationSpec = tween(280), label = "strip")
-        Row(Modifier.wrapContentWidth(align = Alignment.Start, unbounded = true).offset(x = off)) {
-            order.forEachIndexed { i, m ->
-                ModePill(m.label, i == idx, Modifier.width(itemW).height(42.dp)) { onSelect(m) }
+fun ModeStrip(pos: Float, order: List<Mode>, itemW: Dp, onTap: (Mode) -> Unit) {
+    val itemPx = with(LocalDensity.current) { itemW.toPx() }
+    Box(Modifier.fillMaxWidth().height(44.dp).clipToBounds(), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.width(itemW).height(34.dp).clip(RoundedCornerShape(50)).background(Color(0x40FFFFFF))
+        )
+        order.forEachIndexed { i, m ->
+            val d = i - pos
+            val dist = abs(d)
+            val sel = (1f - dist).coerceIn(0f, 1f)
+            val tc = lerp(Color(0xCCFFFFFF), YELLOW, sel)
+            val a = (1.15f - dist * 0.32f).coerceIn(0.25f, 1f)
+            val sc = 0.92f + 0.08f * sel
+            Box(
+                Modifier.width(itemW).height(44.dp)
+                    .offset { IntOffset((d * itemPx).roundToInt(), 0) }
+                    .graphicsLayer { alpha = a; scaleX = sc; scaleY = sc }
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onTap(m) },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    m.label, color = tc, fontSize = 14.sp, maxLines = 1,
+                    fontWeight = if (sel > 0.5f) FontWeight.Bold else FontWeight.Normal
+                )
             }
         }
     }
