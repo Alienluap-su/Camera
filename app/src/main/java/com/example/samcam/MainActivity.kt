@@ -4,52 +4,25 @@ package com.example.samcam
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas as GCanvas
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
-import android.graphics.ImageFormat
-import android.graphics.Matrix
-import android.graphics.Paint
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
-import android.graphics.Rect
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
-import android.media.ImageReader
 import android.media.MediaActionSound
-import android.media.MediaCodec
-import android.media.MediaCodecInfo
-import android.media.MediaExtractor
-import android.media.MediaFormat
-import android.media.MediaMuxer
-import android.media.MediaRecorder
 import android.net.Uri
-import android.net.wifi.WifiManager
-import android.net.wifi.WifiNetworkSuggestion
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.HandlerThread
-import android.os.ParcelFileDescriptor
-import android.provider.DocumentsContract
 import android.provider.MediaStore
-import android.provider.Settings
 import android.util.Range
+import android.util.Rational
 import android.util.Size
 import android.view.KeyEvent
 import android.view.Surface
@@ -70,9 +43,9 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
-import androidx.camera.core.UseCase
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.ViewPort
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
@@ -89,10 +62,8 @@ import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -106,61 +77,75 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Observer
 import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.segmentation.SegmentationMask
+import com.google.mlkit.vision.label.ImageLabeling
+import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
 import com.google.mlkit.vision.segmentation.Segmentation
-import com.google.mlkit.vision.segmentation.Segmenter
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -174,10 +159,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.OutputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import kotlin.math.abs
@@ -185,610 +168,8 @@ import kotlin.math.atan
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.roundToInt
-import kotlin.math.sqrt
 
-enum class Mode(val label: String) {
-    PRO("Pro"), PANO("Panorama"), SLOMO("Slow motion"), VIDEO("Video"), PHOTO("Photo"),
-    PORTRAIT("Portrait"), NIGHT("Night"), DOC("Document"), TIMELAPSE("Time-lapse")
-}
-
-val stillModes = setOf(Mode.PHOTO, Mode.PRO, Mode.PORTRAIT, Mode.NIGHT, Mode.DOC)
-
-object Bus {
-    var tick by mutableIntStateOf(0)
-    var zoomTick by mutableIntStateOf(0)
-    var zoomUp = true
-    var volMode = 0
-}
-
-class QrResult(
-    val text: String, val kind: Int, val label: String,
-    val ssid: String?, val pass: String?, val wifiType: Int, val hidden: Boolean
-)
-
-class Attempt(val still: Boolean, val analysis: Boolean)
-class ProbeRes(val fps: Double, val msg: String)
-class JpegData(val bytes: ByteArray, val rot: Int)
-
-val YELLOW = Color(0xFFFFC107)
-val sizeNames = listOf("Max", "8M", "3M")
-val sizeLong = listOf(0, 3264, 2048)
-val jpegNames = listOf("Max (100)", "High (95)", "Normal (85)")
-val jpegVals = listOf(100, 95, 85)
-val vqNames = listOf("4K", "1080p", "720p", "480p")
-val vqVals = listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD)
-val fpsVals = listOf(24, 30, 60)
-val tlVals = listOf(1, 2, 5, 10)
-val timerVals = listOf(0, 2, 5, 10)
-val brNames = listOf("Auto", "20 Mbps", "35 Mbps", "50 Mbps")
-val brVals = listOf(0, 20_000_000, 35_000_000, 50_000_000)
-val volNames = listOf("Shutter", "Zoom", "Off")
-val slowNames = listOf("2x", "4x", "8x")
-val slowVals = listOf(2, 4, 8)
-val blurNames = listOf("Low", "Medium", "High")
-val blurDiv = listOf(6, 10, 16)
-val prioNames = listOf("Quality", "Balanced", "Speed")
-val engineNames = listOf("Auto (fast)", "TextureView (compatible)")
-val wbNames = listOf("AUTO", "DAY", "CLOUD", "TUNG", "FLUO")
-val wbVals = listOf(
-    CaptureRequest.CONTROL_AWB_MODE_AUTO, CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT,
-    CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT, CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT,
-    CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT
-)
-
-fun shutLabel(ns: Long): String =
-    if (ns <= 0L) "-" else if (ns >= 100_000_000L) "%.1fs".format(ns / 1e9) else "1/${(1e9 / ns).toInt()}"
-
-fun fmtTime(s: Long): String {
-    val h = s / 3600
-    val m = (s % 3600) / 60
-    val sec = s % 60
-    return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%02d:%02d".format(m, sec)
-}
-
-fun fmtZoom(z: Float): String =
-    if (abs(z - z.roundToInt()) < 0.05f) "${z.roundToInt()}x" else "%.1fx".format(z)
-
-fun fmtPreset(z: Float): String =
-    if (abs(z - z.roundToInt()) < 0.01f) "${z.roundToInt()}" else "%.1f".format(z)
-
-fun stampNow(): String = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-
-fun copyText(ctx: Context, text: String) {
-    (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-        .setPrimaryClip(ClipData.newPlainText("camera", text))
-}
-
-fun makeQr(b: Barcode, raw: String): QrResult {
-    val w = if (b.valueType == Barcode.TYPE_WIFI) b.wifi else null
-    val ssid = w?.ssid
-    if (!ssid.isNullOrEmpty()) {
-        return QrResult(raw, 2, "Join: $ssid", ssid, w?.password, w?.encryptionType ?: 2, raw.contains("H:true", true))
-    }
-    val url: String? = b.url?.url ?: (if (raw.startsWith("http", true)) raw else null)
-    if (url != null) {
-        val shown = url.removePrefix("https://").removePrefix("http://").removePrefix("www.")
-        return QrResult(url, 1, "Open: $shown", null, null, 0, false)
-    }
-    return QrResult(raw, 0, "Copy: " + raw.replace("\n", " "), null, null, 0, false)
-}
-
-fun connectWifi(ctx: Context, ssid: String, pass: String?, type: Int, hidden: Boolean): String {
-    try {
-        if (type == 3) {
-            if (!pass.isNullOrEmpty()) copyText(ctx, pass)
-            ctx.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            return "WEP can't be added by apps. Password copied; pick \"$ssid\" in Wi-Fi settings."
-        }
-        val b = WifiNetworkSuggestion.Builder().setSsid(ssid)
-        if (type != 1 && !pass.isNullOrEmpty()) b.setWpa2Passphrase(pass)
-        if (hidden) b.setIsHiddenSsid(true)
-        val sug = b.build()
-        if (Build.VERSION.SDK_INT >= 30) {
-            val i = Intent(Settings.ACTION_WIFI_ADD_NETWORKS)
-            i.putParcelableArrayListExtra(Settings.EXTRA_WIFI_NETWORK_LIST, arrayListOf(sug))
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            ctx.startActivity(i)
-            return "Tap Save in the Wi-Fi prompt to join \"$ssid\""
-        }
-        val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        val st = wm.addNetworkSuggestions(listOf(sug))
-        return if (st == WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS) {
-            "Network \"$ssid\" suggested. Android will connect when it is in range."
-        } else {
-            "Android refused the network suggestion (code $st)."
-        }
-    } catch (e: Exception) {
-        if (!pass.isNullOrEmpty()) copyText(ctx, pass)
-        try {
-            ctx.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        } catch (x: Exception) {
-        }
-        return "Couldn't add it automatically. Password copied; choose \"$ssid\" in Wi-Fi settings."
-    }
-}
-
-fun treeRoot(tree: Uri): Uri =
-    DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
-
-fun docCreate(ctx: Context, parent: Uri, mime: String, name: String): Uri? {
-    return try {
-        DocumentsContract.createDocument(ctx.contentResolver, parent, mime, name)
-    } catch (e: Exception) {
-        null
-    }
-}
-
-class VideoOut(val pfd: ParcelFileDescriptor, val uri: Uri)
-
-fun openVideoOut(ctx: Context, tree: Uri?, name: String, relPath: String): VideoOut? {
-    try {
-        if (tree != null) {
-            val doc = docCreate(ctx, treeRoot(tree), "video/mp4", "$name.mp4")
-            if (doc != null) {
-                val p = ctx.contentResolver.openFileDescriptor(doc, "rw")
-                if (p != null) return VideoOut(p, doc)
-            }
-        }
-        val cv = ContentValues()
-        cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-        cv.put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-        cv.put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
-        val uri = ctx.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, cv) ?: return null
-        val p = ctx.contentResolver.openFileDescriptor(uri, "rw") ?: return null
-        return VideoOut(p, uri)
-    } catch (e: Exception) {
-        return null
-    }
-}
-
-fun saveBitmap(ctx: Context, bmp: Bitmap, tree: Uri?, prefix: String): Uri? {
-    val name = prefix + stampNow()
-    try {
-        var uri: Uri? = null
-        var out: OutputStream? = null
-        if (tree != null) {
-            uri = docCreate(ctx, treeRoot(tree), "image/jpeg", "$name.jpg")
-            if (uri != null) out = ctx.contentResolver.openOutputStream(uri)
-        }
-        if (out == null) {
-            val cv = ContentValues()
-            cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            cv.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-            cv.put(MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/SamCam")
-            uri = ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
-            if (uri != null) out = ctx.contentResolver.openOutputStream(uri)
-        }
-        if (out == null) return null
-        out.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
-        return uri
-    } catch (e: Exception) {
-        return null
-    }
-}
-
-fun loadThumb(ctx: Context, uri: Uri, mime: String): Bitmap? {
-    try {
-        if (Build.VERSION.SDK_INT >= 29) {
-            return ctx.contentResolver.loadThumbnail(uri, Size(200, 200), null)
-        }
-    } catch (e: Exception) {
-    }
-    if (mime.startsWith("image")) {
-        try {
-            val opts = BitmapFactory.Options()
-            opts.inSampleSize = 8
-            ctx.contentResolver.openInputStream(uri)?.use { return BitmapFactory.decodeStream(it, null, opts) }
-        } catch (e: Exception) {
-        }
-    }
-    return null
-}
-
-fun decodeJpeg(d: JpegData, mirror: Boolean, maxSide: Int): Bitmap? {
-    try {
-        val o = BitmapFactory.Options()
-        o.inJustDecodeBounds = true
-        BitmapFactory.decodeByteArray(d.bytes, 0, d.bytes.size, o)
-        var ss = 1
-        while (maxOf(o.outWidth, o.outHeight) / ss > maxSide) ss *= 2
-        val o2 = BitmapFactory.Options()
-        o2.inSampleSize = ss
-        val raw = BitmapFactory.decodeByteArray(d.bytes, 0, d.bytes.size, o2) ?: return null
-        val m = Matrix()
-        m.postRotate(d.rot.toFloat())
-        if (mirror) m.postScale(-1f, 1f)
-        return Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
-    } catch (e: Exception) {
-        return null
-    }
-}
-
-suspend fun portraitBlur(src: Bitmap, segmenter: Segmenter, div: Int): Bitmap {
-    val w = src.width
-    val h = src.height
-    val sc = 640f / maxOf(w, h)
-    val small = Bitmap.createScaledBitmap(src, maxOf(1, (w * sc).toInt()), maxOf(1, (h * sc).toInt()), true)
-    val mask: SegmentationMask? = suspendCoroutine { c ->
-        try {
-            segmenter.process(InputImage.fromBitmap(small, 0))
-                .addOnSuccessListener { c.resume(it) }
-                .addOnFailureListener { c.resume(null) }
-        } catch (e: Exception) {
-            c.resume(null)
-        }
-    }
-    var mw = 64
-    var mh = 64
-    var conf = FloatArray(mw * mh)
-    var cover = 0
-    if (mask != null) {
-        try {
-            mw = mask.width
-            mh = mask.height
-            conf = FloatArray(mw * mh)
-            val bb = mask.buffer
-            bb.rewind()
-            for (i in conf.indices) {
-                val v = bb.getFloat()
-                conf[i] = v
-                if (v > 0.6f) cover++
-            }
-        } catch (e: Exception) {
-            cover = 0
-        }
-    }
-    if (mask == null || cover < mw * mh * 0.02f) {
-        for (y in 0 until mh) {
-            for (x in 0 until mw) {
-                val dx = ((x + 0.5f) / mw - 0.5f) / 0.38f
-                val dy = ((y + 0.5f) / mh - 0.5f) / 0.46f
-                val d = sqrt(dx * dx + dy * dy) * 0.75f
-                conf[y * mw + x] = ((1.1f - d) / 0.35f).coerceIn(0f, 1f)
-            }
-        }
-    }
-    val px = IntArray(mw * mh)
-    for (i in px.indices) {
-        val a = ((conf[i] - 0.4f) / 0.25f).coerceIn(0f, 1f)
-        px[i] = (a * 255f).toInt() shl 24
-    }
-    val maskBmp = Bitmap.createBitmap(px, mw, mh, Bitmap.Config.ARGB_8888)
-    val maskScaled = Bitmap.createScaledBitmap(maskBmp, w, h, true)
-
-    val bw = maxOf(2, w / div)
-    val bh = maxOf(2, h / div)
-    val b1 = Bitmap.createScaledBitmap(src, bw, bh, true)
-    val b2 = Bitmap.createScaledBitmap(b1, maxOf(1, bw / 2), maxOf(1, bh / 2), true)
-    val blurred = Bitmap.createScaledBitmap(b2, w, h, true)
-
-    val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-    val cv = GCanvas(result)
-    cv.drawBitmap(blurred, 0f, 0f, null)
-    val fg = src.copy(Bitmap.Config.ARGB_8888, true)
-    val p = Paint()
-    p.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-    GCanvas(fg).drawBitmap(maskScaled, 0f, 0f, p)
-    cv.drawBitmap(fg, 0f, 0f, null)
-    return result
-}
-
-fun docEnhance(src: Bitmap, bw: Boolean): Bitmap {
-    val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-    val cm = ColorMatrix()
-    if (bw) cm.setSaturation(0f)
-    val k = 1.55f
-    val t = (-0.5f * k + 0.5f) * 255f + 30f
-    cm.postConcat(
-        ColorMatrix(
-            floatArrayOf(
-                k, 0f, 0f, 0f, t,
-                0f, k, 0f, 0f, t,
-                0f, 0f, k, 0f, t,
-                0f, 0f, 0f, 1f, 0f
-            )
-        )
-    )
-    val p = Paint()
-    p.colorFilter = ColorMatrixColorFilter(cm)
-    GCanvas(out).drawBitmap(src, 0f, 0f, p)
-    return out
-}
-
-fun remuxSlow(src: File, dst: ParcelFileDescriptor, factor: Int): Boolean {
-    val ex = MediaExtractor()
-    var mux: MediaMuxer? = null
-    var started = false
-    try {
-        ex.setDataSource(src.absolutePath)
-        var vt = -1
-        for (i in 0 until ex.trackCount) {
-            val mime = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: ""
-            if (mime.startsWith("video/")) {
-                vt = i
-                break
-            }
-        }
-        if (vt < 0) return false
-        ex.selectTrack(vt)
-        val fmt = ex.getTrackFormat(vt)
-        val m = MediaMuxer(dst.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-        mux = m
-        if (fmt.containsKey(MediaFormat.KEY_ROTATION)) m.setOrientationHint(fmt.getInteger(MediaFormat.KEY_ROTATION))
-        val track = m.addTrack(fmt)
-        m.start()
-        started = true
-        val buf = java.nio.ByteBuffer.allocate(4 * 1024 * 1024)
-        val info = MediaCodec.BufferInfo()
-        while (true) {
-            buf.clear()
-            val n = ex.readSampleData(buf, 0)
-            if (n < 0) break
-            val flags = if ((ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-            info.set(0, n, ex.sampleTime * factor, flags)
-            m.writeSampleData(track, buf, info)
-            ex.advance()
-        }
-        return true
-    } catch (e: Exception) {
-        return false
-    } finally {
-        try { if (started) mux?.stop() } catch (e: Exception) {}
-        try { mux?.release() } catch (e: Exception) {}
-        try { ex.release() } catch (e: Exception) {}
-    }
-}
-
-class ZoomSender(private val exec: java.util.concurrent.Executor) {
-    var cam: Camera? = null
-    private var busy = false
-    private var pending = Float.NaN
-
-    fun send(z: Float) {
-        val c = cam ?: return
-        if (busy) {
-            pending = z
-            return
-        }
-        busy = true
-        try {
-            val f = c.cameraControl.setZoomRatio(z)
-            f.addListener({
-                busy = false
-                val p = pending
-                if (!p.isNaN()) {
-                    pending = Float.NaN
-                    send(p)
-                }
-            }, exec)
-        } catch (e: Exception) {
-            busy = false
-        }
-    }
-}
-
-class TimelapseEncoder(val w: Int, val h: Int, private val pfd: ParcelFileDescriptor) {
-    private val dst = Rect(0, 0, w, h)
-    private val info = MediaCodec.BufferInfo()
-    private val codec: MediaCodec
-    private val inputSurface: Surface
-    private val muxer: MediaMuxer
-    private var track = -1
-    private var started = false
-    private var written = 0
-
-    init {
-        val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h)
-        fmt.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-        fmt.setInteger(MediaFormat.KEY_BIT_RATE, 10_000_000)
-        fmt.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-        fmt.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-        codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        inputSurface = codec.createInputSurface()
-        codec.start()
-        muxer = MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-    }
-
-    fun addFrame(bmp: Bitmap) {
-        val canvas = inputSurface.lockCanvas(null)
-        try {
-            canvas.drawBitmap(bmp, null, dst, null)
-        } finally {
-            inputSurface.unlockCanvasAndPost(canvas)
-        }
-        drain(false)
-    }
-
-    private fun drain(end: Boolean) {
-        val deadline = System.currentTimeMillis() + 4000L
-        while (true) {
-            val idx = try {
-                codec.dequeueOutputBuffer(info, if (end) 10_000L else 0L)
-            } catch (e: Exception) {
-                return
-            }
-            if (idx == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                if (!end) return
-                if (System.currentTimeMillis() > deadline) return
-            } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                if (!started) {
-                    track = muxer.addTrack(codec.outputFormat)
-                    muxer.start()
-                    started = true
-                }
-            } else if (idx >= 0) {
-                val buf = codec.getOutputBuffer(idx)
-                if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) info.size = 0
-                if (info.size > 0 && started && buf != null) {
-                    buf.position(info.offset)
-                    buf.limit(info.offset + info.size)
-                    info.presentationTimeUs = written * 33_333L
-                    muxer.writeSampleData(track, buf, info)
-                    written++
-                }
-                codec.releaseOutputBuffer(idx, false)
-                if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) return
-            } else {
-                if (!end || System.currentTimeMillis() > deadline) return
-            }
-        }
-    }
-
-    fun finish() {
-        try { codec.signalEndOfInputStream() } catch (e: Exception) {}
-        try { drain(true) } catch (e: Exception) {}
-        try { codec.stop() } catch (e: Exception) {}
-        try { codec.release() } catch (e: Exception) {}
-        try { inputSurface.release() } catch (e: Exception) {}
-        try { if (started) muxer.stop() } catch (e: Exception) {}
-        try { muxer.release() } catch (e: Exception) {}
-        try { pfd.close() } catch (e: Exception) {}
-    }
-}
-
-@SuppressLint("MissingPermission")
-suspend fun probeOnce(ctx: Context, camId: String, fps: Int): ProbeRes {
-    val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-    val map = try {
-        cm.getCameraCharacteristics(camId).get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-    } catch (e: Exception) {
-        null
-    }
-    if (map == null) return ProbeRes(-1.0, "no stream map")
-    val sizes = map.getOutputSizes(ImageFormat.YUV_420_888)
-    if (sizes == null || sizes.isEmpty()) return ProbeRes(-1.0, "no YUV sizes")
-    val size = sizes.firstOrNull { it.width == 1920 && it.height == 1080 }
-        ?: sizes.filter { it.width <= 1920 }.maxByOrNull { it.width * it.height }
-        ?: sizes[0]
-
-    val thread = HandlerThread("fpsprobe")
-    thread.start()
-    val handler = Handler(thread.looper)
-    val stamps = ArrayList<Long>()
-    val reader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 5)
-    reader.setOnImageAvailableListener({ r ->
-        try {
-            val img = r.acquireNextImage()
-            if (img != null) {
-                synchronized(stamps) { stamps.add(img.timestamp) }
-                img.close()
-            }
-        } catch (e: Exception) {
-        }
-    }, handler)
-
-    var device: CameraDevice? = null
-    var session: CameraCaptureSession? = null
-    var res = ProbeRes(-1.0, "unknown")
-    try {
-        val opened = CompletableDeferred<CameraDevice?>()
-        cm.openCamera(camId, object : CameraDevice.StateCallback() {
-            override fun onOpened(camera: CameraDevice) {
-                opened.complete(camera)
-            }
-
-            override fun onDisconnected(camera: CameraDevice) {
-                camera.close()
-                opened.complete(null)
-            }
-
-            override fun onError(camera: CameraDevice, error: Int) {
-                camera.close()
-                opened.complete(null)
-            }
-        }, handler)
-        val dev = withTimeoutOrNull(4000L) { opened.await() }
-        if (dev == null) {
-            res = ProbeRes(-1.0, "camera did not open")
-        } else {
-            device = dev
-            val ready = CompletableDeferred<CameraCaptureSession?>()
-            dev.createCaptureSession(listOf(reader.surface), object : CameraCaptureSession.StateCallback() {
-                override fun onConfigured(s: CameraCaptureSession) {
-                    ready.complete(s)
-                }
-
-                override fun onConfigureFailed(s: CameraCaptureSession) {
-                    ready.complete(null)
-                }
-            }, handler)
-            val sess = withTimeoutOrNull(4000L) { ready.await() }
-            if (sess == null) {
-                res = ProbeRes(-1.0, "session failed at ${size.width}x${size.height}")
-            } else {
-                session = sess
-                val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-                req.addTarget(reader.surface)
-                req.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
-                sess.setRepeatingRequest(req.build(), null, handler)
-                delay(2600)
-                val list = synchronized(stamps) { ArrayList(stamps) }
-                if (list.size < 20) {
-                    res = ProbeRes(-1.0, "only ${list.size} frames arrived")
-                } else {
-                    val s = list.subList(8, list.size)
-                    val span = (s[s.size - 1] - s[0]) / 1e9
-                    val f = (s.size - 1) / span
-                    res = ProbeRes(f, "%.1f fps at %dx%d".format(f, size.width, size.height))
-                }
-            }
-        }
-    } catch (e: Exception) {
-        if (e is CancellationException) throw e
-        res = ProbeRes(-1.0, "error: ${e.message}")
-    } finally {
-        try { session?.close() } catch (e: Exception) {}
-        try { device?.close() } catch (e: Exception) {}
-        try { reader.close() } catch (e: Exception) {}
-        try { thread.quitSafely() } catch (e: Exception) {}
-    }
-    return res
-}
-
-fun cameraReport(ctx: Context): String {
-    val sb = StringBuilder("Device: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}\n\n")
-    val capNames = mapOf(1 to "MANUAL_SENSOR", 2 to "MANUAL_POST", 3 to "RAW", 6 to "BURST", 9 to "HIGH_SPEED", 11 to "LOGICAL_MULTI")
-    try {
-        val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        for (id in cm.cameraIdList) {
-            val c = cm.getCameraCharacteristics(id)
-            val facing = when (c.get(CameraCharacteristics.LENS_FACING)) { 0 -> "front"; 1 -> "back"; 2 -> "external"; else -> "?" }
-            val level = when (c.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)) {
-                0 -> "LIMITED"; 1 -> "FULL"; 2 -> "LEGACY"; 3 -> "LEVEL_3"; else -> "?"
-            }
-            sb.append("Camera $id ($facing, $level)\n")
-            c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.let { caps ->
-                sb.append("  Caps: ${caps.joinToString { capNames[it] ?: "#$it" }}\n")
-            }
-            c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)?.let { sb.append("  AE fps: ${it.joinToString()}\n") }
-            c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let { sb.append("  ISO: $it\n") }
-            c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let { sb.append("  Exposure ns: $it\n") }
-            c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)?.let { sb.append("  Min focus dist: $it\n") }
-            val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            map?.getOutputSizes(MediaRecorder::class.java)?.take(6)?.let { sb.append("  Video sizes: ${it.joinToString()}\n") }
-            val hs = map?.highSpeedVideoSizes
-            if (hs == null || hs.isEmpty()) {
-                sb.append("  High-speed: none\n")
-            } else {
-                for (s in hs.take(4)) {
-                    sb.append("  High-speed $s: ${map.getHighSpeedVideoFpsRangesFor(s)?.joinToString()}\n")
-                }
-            }
-            sb.append("\n")
-        }
-        if (Build.VERSION.SDK_INT >= 30) {
-            try {
-                sb.append("Concurrent camera sets: ${cm.concurrentCameraIds}\n")
-            } catch (e: Exception) {
-                sb.append("Concurrent camera sets: unavailable\n")
-            }
-        }
-    } catch (e: Exception) {
-        sb.append("Error: ${e.message}")
-    }
-    return sb.toString()
-}
+class Attempt(val still: Boolean, val video: Boolean, val analysis: Boolean)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -815,41 +196,19 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun LogoMark(dp: Dp) {
-    Canvas(Modifier.size(dp)) {
-        val w = this.size.width
-        drawRoundRect(Color(0xFFF4F4F4), cornerRadius = CornerRadius(w * 0.24f))
-        val c = Offset(w * 0.5f, w * 0.5f)
-        drawCircle(Color(0xFF2A2A2C), radius = w * 0.34f, center = c)
-        drawCircle(Color(0xFF111113), radius = w * 0.29f, center = c)
-        drawCircle(Color(0xFF3A3A3E), radius = w * 0.21f, center = c)
-        drawCircle(Color(0xFF050506), radius = w * 0.185f, center = c)
-        drawCircle(Color(0xFF2E3A4A), radius = w * 0.09f, center = c)
-        drawCircle(Color.White.copy(alpha = 0.9f), radius = w * 0.032f, center = Offset(w * 0.44f, w * 0.43f))
-        drawCircle(Color(0xFFE53935), radius = w * 0.046f, center = Offset(w * 0.8f, w * 0.2f))
-    }
-}
-
-@Composable
-fun Splash() {
-    Box(Modifier.fillMaxSize().background(Color(0xFF0E1116)), Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            LogoMark(110.dp)
-            Spacer(Modifier.height(16.dp))
-            Text("Camera", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Medium)
-        }
-    }
-}
-
-@Composable
 fun Root() {
     val ctx = LocalContext.current
-    val perms = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
-    fun granted() = perms.all { ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED }
+    val need = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+    val ask = if (Build.VERSION.SDK_INT >= 33) {
+        arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO, Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+    } else {
+        arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO, Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+    fun granted() = need.all { ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED }
     var ok by remember { mutableStateOf(granted()) }
     var splash by remember { mutableStateOf(true) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { ok = granted() }
-    LaunchedEffect(Unit) { if (!ok) launcher.launch(perms) }
+    LaunchedEffect(Unit) { if (!ok) launcher.launch(ask) }
     LaunchedEffect(Unit) { delay(1300); splash = false }
     if (ok) {
         Box(Modifier.fillMaxSize()) {
@@ -875,6 +234,8 @@ fun CameraScreen() {
     val haptic = LocalHapticFeedback.current
     val sound = remember { MediaActionSound() }
     val sm = remember { ctx.getSystemService(Context.SENSOR_SERVICE) as SensorManager }
+    val prefs = remember { ctx.getSharedPreferences("samcam", Context.MODE_PRIVATE) }
+    val s = remember { AppSettings(prefs) }
     val previewView = remember {
         PreviewView(ctx).apply {
             scaleType = PreviewView.ScaleType.FILL_CENTER
@@ -882,12 +243,10 @@ fun CameraScreen() {
         }
     }
     val scanner = remember { BarcodeScanning.getClient() }
+    val labeler = remember { ImageLabeling.getClient(ImageLabelerOptions.DEFAULT_OPTIONS) }
+    val recLazy = remember { lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) } }
     val segLazy = remember {
-        lazy {
-            Segmentation.getClient(
-                SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()
-            )
-        }
+        lazy { Segmentation.getClient(SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()) }
     }
     val camIds = remember {
         try {
@@ -910,11 +269,10 @@ fun CameraScreen() {
         }
         found
     }
-    val prefs = remember { ctx.getSharedPreferences("samcam", Context.MODE_PRIVATE) }
+    val tele = remember { detectTele(ctx) }
     val modeOrder = remember { Mode.values().toList() }
     val itemW = 104.dp
-    val itemPx = with(LocalDensity.current) { itemW.toPx() }
-    val zoomSender = remember { ZoomSender(exec) }
+    val itemPx = with(androidx.compose.ui.platform.LocalDensity.current) { itemW.toPx() }
 
     var sdUri by remember {
         mutableStateOf<Uri?>(
@@ -939,52 +297,32 @@ fun CameraScreen() {
     }
 
     var mode by remember {
-        mutableStateOf(
-            if (prefs.getBoolean("remember", false)) modeOrder.getOrElse(prefs.getInt("lastmode", 4)) { Mode.PHOTO }
-            else Mode.PHOTO
-        )
+        mutableStateOf(if (s.restoreMode) modeOrder.getOrElse(s.lastMode) { Mode.PHOTO } else Mode.PHOTO)
     }
+    val modeNow = rememberUpdatedState(mode)
     val modePos = remember { mutableFloatStateOf(modeOrder.indexOf(mode).toFloat()) }
     var modeAnim by remember { mutableStateOf<Job?>(null) }
-    var front by remember { mutableStateOf(prefs.getBoolean("deffront", false)) }
+    var front by remember { mutableStateOf(s.defFront) }
+    var lastFront by remember { mutableStateOf(front) }
     var camChoice by remember { mutableIntStateOf(0) }
-    var ratio43 by remember { mutableStateOf(prefs.getBoolean("r43", true)) }
+    var lastCamChoice by remember { mutableIntStateOf(0) }
     var flash by remember { mutableIntStateOf(0) }
     var torch by remember { mutableStateOf(false) }
     var timer by remember { mutableIntStateOf(0) }
     var countdown by remember { mutableIntStateOf(0) }
     var holdStill by remember { mutableStateOf(false) }
-    var sizeIdx by remember { mutableIntStateOf(prefs.getInt("size", 0)) }
-    var jpegIdx by remember { mutableIntStateOf(prefs.getInt("jpeg", 1)) }
-    var vqIdx by remember { mutableIntStateOf(prefs.getInt("vq", 1)) }
-    var fpsIdx by remember { mutableIntStateOf(prefs.getInt("fps", 1)) }
-    var brIdx by remember { mutableIntStateOf(prefs.getInt("br", 0)) }
-    var tlIdx by remember { mutableIntStateOf(prefs.getInt("tl", 1)) }
-    var slowIdx by remember { mutableIntStateOf(prefs.getInt("slow", 1)) }
-    var blurIdx by remember { mutableIntStateOf(prefs.getInt("blur", 1)) }
-    var prioIdx by remember { mutableIntStateOf(prefs.getInt("prio", 0)) }
-    var enginePref by remember { mutableIntStateOf(prefs.getInt("engine", 0)) }
-    var mic by remember { mutableStateOf(prefs.getBoolean("mic", true)) }
-    var grid by remember { mutableStateOf(prefs.getBoolean("grid", false)) }
-    var volMode by remember { mutableIntStateOf(prefs.getInt("vol", 0)) }
-    var mirror by remember { mutableStateOf(prefs.getBoolean("mirror", true)) }
-    var forceFps by remember { mutableStateOf(prefs.getBoolean("force", false)) }
-    var usePhotos by remember { mutableStateOf(prefs.getBoolean("photos", true)) }
-    var shutterSound by remember { mutableStateOf(prefs.getBoolean("sound", true)) }
-    var vibrate by remember { mutableStateOf(prefs.getBoolean("vibe", true)) }
-    var tapFocus by remember { mutableStateOf(prefs.getBoolean("tap", true)) }
-    var keepOn by remember { mutableStateOf(prefs.getBoolean("keep", true)) }
-    var flashAnim by remember { mutableStateOf(prefs.getBoolean("flashanim", true)) }
-    var showZoom by remember { mutableStateOf(prefs.getBoolean("showzoom", true)) }
-    var defFront by remember { mutableStateOf(prefs.getBoolean("deffront", false)) }
-    var rememberMode by remember { mutableStateOf(prefs.getBoolean("remember", false)) }
-    var qrScan by remember { mutableStateOf(prefs.getBoolean("qrscan", true)) }
-    var docBw by remember { mutableStateOf(prefs.getBoolean("docbw", true)) }
-    var showSettings by remember { mutableStateOf(false) }
-    var showInfo by remember { mutableStateOf(false) }
     var qr by remember { mutableStateOf<QrResult?>(null) }
     var qrDismissed by remember { mutableStateOf<String?>(null) }
     var qrSeen by remember { mutableLongStateOf(0L) }
+    var scene by remember { mutableStateOf<String?>(null) }
+    var sceneSeen by remember { mutableLongStateOf(0L) }
+    var docFound by remember { mutableStateOf(false) }
+    var docSeen by remember { mutableLongStateOf(0L) }
+    var scanCounter by remember { mutableIntStateOf(0) }
+    val analyzeBusy = remember { AtomicBoolean(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var showInfo by remember { mutableStateOf(false) }
+    var showGallery by remember { mutableStateOf(false) }
     var tlOn by remember { mutableStateOf(false) }
     var tlJob by remember { mutableStateOf<Job?>(null) }
     var tlCount by remember { mutableIntStateOf(0) }
@@ -997,11 +335,19 @@ fun CameraScreen() {
     var camera by remember { mutableStateOf<Camera?>(null) }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var videoCapture by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
+    var liveReady by remember { mutableStateOf(false) }
+    var useTele by remember { mutableStateOf(false) }
+    var teleBroken by remember { mutableStateOf(false) }
+    var hdrDriver by remember { mutableStateOf(false) }
     val zoomTarget = remember { mutableFloatStateOf(1f) }
     val zoomShown = remember { mutableFloatStateOf(1f) }
     val rulerBump = remember { mutableIntStateOf(0) }
+    var rulerShown by remember { mutableStateOf(false) }
     var minZoom by remember { mutableFloatStateOf(1f) }
     var maxZoom by remember { mutableFloatStateOf(1f) }
+    var camMin by remember { mutableFloatStateOf(1f) }
+    var camMax by remember { mutableFloatStateOf(1f) }
+    var camBase by remember { mutableFloatStateOf(1f) }
     var elapsed by remember { mutableLongStateOf(0L) }
     var accMs by remember { mutableLongStateOf(0L) }
     var lastUri by remember { mutableStateOf<Uri?>(prefs.getString("last_uri", null)?.let { Uri.parse(it) }) }
@@ -1010,13 +356,15 @@ fun CameraScreen() {
     var focusPos by remember { mutableStateOf<Offset?>(null) }
     var focusTick by remember { mutableIntStateOf(0) }
     val focusAnimV = remember { Animatable(1f) }
-    val switchAlpha = remember { Animatable(0f) }
     val shutterAnim = remember { Animatable(0f) }
     var screenFlash by remember { mutableStateOf(false) }
     var camPaused by remember { mutableStateOf(false) }
     var probeRunning by remember { mutableStateOf(false) }
     var probeResult by remember { mutableStateOf("") }
     var nightFps by remember { mutableStateOf<Range<Int>?>(null) }
+    var streaming by remember { mutableStateOf(false) }
+    var screenW by remember { mutableIntStateOf(0) }
+    var screenH by remember { mutableIntStateOf(0) }
 
     var proWb by remember { mutableIntStateOf(0) }
     var ev by remember { mutableIntStateOf(0) }
@@ -1030,9 +378,29 @@ fun CameraScreen() {
     var evRange by remember { mutableStateOf<Range<Int>?>(null) }
     var minFocus by remember { mutableFloatStateOf(0f) }
 
-    val use43 = ratio43 && mode != Mode.VIDEO && mode != Mode.SLOMO
     val isRec = recording != null
     val capturing = isRec || tlOn || panoOn
+    val capturingNow = rememberUpdatedState(capturing)
+    val bindCat = when (mode) {
+        Mode.VIDEO -> "v"
+        Mode.SLOMO -> "s"
+        Mode.TIMELAPSE -> "t"
+        Mode.PANO -> "p"
+        Mode.ULTRA -> "u"
+        else -> "i"
+    }
+    val isStillCat = bindCat == "i" || bindCat == "u"
+    val usesRatio = isStillCat || bindCat == "t"
+    val ratioKey = if (isStillCat) s.ratioIdx else -1
+    val capSize = if (bindCat == "u") 0 else s.sizeIdx
+    val maxQ = mode == Mode.NIGHT || mode == Mode.ULTRA || s.prioIdx == 0 || s.jpegIdx == 0
+    val liveWanted = s.live && mode == Mode.PHOTO
+    val analysisWanted = isStillCat && ((mode == Mode.PHOTO && s.qrScan) || s.scenePill || mode == Mode.DOC)
+    val fullAr = if (screenH > 0) screenW.toFloat() / screenH else 0.5f
+    val arTarget = if (usesRatio) ratioAr(s.ratioIdx, fullAr) else 0.5625f
+    val isFull = usesRatio && ratios[s.ratioIdx].w == 0
+    val arAnim by animateFloatAsState(targetValue = arTarget, animationSpec = tween(280), label = "ar")
+
     val ir = isoRange
     val xr = expRange
     val isoVal = if (ir != null) (ir.lower + proIsoF * (ir.upper - ir.lower)).toInt() else 0
@@ -1042,25 +410,16 @@ fun CameraScreen() {
         (lo * Math.pow(hi / lo, proShutF.toDouble())).toLong()
     } else 0L
 
-    val arAnim by animateFloatAsState(
-        targetValue = if (use43) 0.75f else 0.5625f,
-        animationSpec = tween(300), label = "ar"
-    )
-
-    fun toast(s: String) {
-        Toast.makeText(ctx, s, Toast.LENGTH_LONG).show()
-    }
-
-    fun toastSafe(s: String) {
-        scope.launch { toast(s) }
+    fun toast(m: String) {
+        Toast.makeText(ctx, m, Toast.LENGTH_LONG).show()
     }
 
     fun buzz() {
-        if (vibrate) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        if (s.vibe) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
     }
 
     fun snd(kind: Int) {
-        if (shutterSound) {
+        if (s.sound) {
             try {
                 sound.play(kind)
             } catch (e: Exception) {
@@ -1068,45 +427,38 @@ fun CameraScreen() {
         }
     }
 
-    fun setLast(u: Uri?, mime: String) {
+    fun setLast(u: Uri?, m: String) {
         if (u != null) {
             lastUri = u
-            lastMime = mime
-            prefs.edit().putString("last_uri", u.toString()).putString("last_mime", mime).apply()
+            lastMime = m
+            prefs.edit().putString("last_uri", u.toString()).putString("last_mime", m).apply()
         }
     }
 
-    fun zoomDirect(z: Float) {
-        val c = z.coerceIn(minZoom, maxOf(minZoom, maxZoom))
-        zoomShown.floatValue = c
-        zoomTarget.floatValue = c
-        zoomSender.send(c)
+    fun bump() {
         rulerBump.intValue = rulerBump.intValue + 1
     }
 
-    LaunchedEffect(
-        sizeIdx, jpegIdx, vqIdx, fpsIdx, brIdx, tlIdx, slowIdx, blurIdx, prioIdx, enginePref, mic, grid, volMode,
-        mirror, forceFps, usePhotos, shutterSound, vibrate, tapFocus, keepOn, ratio43, flashAnim, showZoom,
-        defFront, rememberMode, qrScan, docBw
-    ) {
-        prefs.edit()
-            .putInt("size", sizeIdx).putInt("jpeg", jpegIdx).putInt("vq", vqIdx).putInt("fps", fpsIdx)
-            .putInt("br", brIdx).putInt("tl", tlIdx).putInt("slow", slowIdx).putInt("blur", blurIdx)
-            .putInt("prio", prioIdx).putInt("engine", enginePref)
-            .putBoolean("mic", mic).putBoolean("grid", grid).putInt("vol", volMode).putBoolean("mirror", mirror)
-            .putBoolean("force", forceFps).putBoolean("photos", usePhotos).putBoolean("sound", shutterSound)
-            .putBoolean("vibe", vibrate).putBoolean("tap", tapFocus).putBoolean("keep", keepOn).putBoolean("r43", ratio43)
-            .putBoolean("flashanim", flashAnim).putBoolean("showzoom", showZoom).putBoolean("deffront", defFront)
-            .putBoolean("remember", rememberMode).putBoolean("qrscan", qrScan).putBoolean("docbw", docBw)
-            .apply()
+    fun setZoom(z: Float) {
+        zoomTarget.floatValue = z.coerceIn(minZoom, maxOf(minZoom, maxZoom))
     }
 
-    LaunchedEffect(mode) {
-        prefs.edit().putInt("lastmode", modeOrder.indexOf(mode)).apply()
+    DisposableEffect(Unit) {
+        val obs = Observer<PreviewView.StreamState> { st -> streaming = st == PreviewView.StreamState.STREAMING }
+        previewView.previewStreamState.observe(owner, obs)
+        onDispose { previewView.previewStreamState.removeObserver(obs) }
     }
+    val coverAlpha by animateFloatAsState(
+        targetValue = if (streaming) 0f else 1f,
+        animationSpec = tween(if (streaming) 260 else 60), label = "cover"
+    )
 
-    LaunchedEffect(keepOn) {
-        if (keepOn) owner.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    SideEffect { Bus.volMode = s.volMode }
+
+    LaunchedEffect(mode) { s.lastMode = modeOrder.indexOf(mode) }
+
+    LaunchedEffect(s.keepOn) {
+        if (s.keepOn) owner.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else owner.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
@@ -1140,40 +492,143 @@ fun CameraScreen() {
         }
     }
 
-    LaunchedEffect(mode, front, camChoice, ratio43) {
-        switchAlpha.snapTo(0.85f)
-        switchAlpha.animateTo(0f, tween(450))
+    LaunchedEffect(rulerBump.intValue) {
+        if (rulerBump.intValue > 0) {
+            rulerShown = true
+            delay(1700)
+            rulerShown = false
+        }
     }
 
     LaunchedEffect(Unit) {
         while (true) {
-            delay(350)
+            delay(400)
             val now = System.currentTimeMillis()
             if (qr != null && now - qrSeen > 2200) qr = null
             if (now - qrSeen > 3000) qrDismissed = null
+            if (scene != null && now - sceneSeen > 3500) scene = null
+            if (docFound && now - docSeen > 2500) docFound = false
         }
     }
 
-    LaunchedEffect(camera) {
-        zoomSender.cam = camera
-    }
-
-    LaunchedEffect(camera) {
-        if (camera == null) return@LaunchedEffect
-        snapshotFlow { zoomTarget.floatValue }.collectLatest { target ->
-            val start = zoomShown.floatValue
-            if (abs(target - start) > 0.003f) {
-                Animatable(start).animateTo(target, spring(dampingRatio = 1f, stiffness = 420f)) {
-                    zoomShown.floatValue = value
-                    zoomSender.send(value)
-                }
+    LaunchedEffect(Unit) {
+        var lastIdx = modePos.floatValue.roundToInt()
+        snapshotFlow { modePos.floatValue.roundToInt() }.collect { i ->
+            if (i != lastIdx) {
+                lastIdx = i
+                if (s.vibe) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
             }
         }
     }
 
+    LaunchedEffect(camera, camBase) {
+        val cam = camera ?: return@LaunchedEffect
+        fun applyZoom(z: Float) {
+            try {
+                cam.cameraControl.setZoomRatio((z / camBase).coerceIn(camMin, maxOf(camMin, camMax)))
+            } catch (e: Exception) {
+            }
+        }
+        applyZoom(zoomShown.floatValue)
+        snapshotFlow { zoomTarget.floatValue }.collectLatest { target ->
+            var last = 0L
+            while (true) {
+                val cur = zoomShown.floatValue
+                if (abs(ln(target) - ln(cur)) < 0.0015f) {
+                    zoomShown.floatValue = target
+                    applyZoom(target)
+                    break
+                }
+                val t = androidx.compose.runtime.withFrameNanos { it }
+                val dt = if (last == 0L) 0.016f else ((t - last) / 1e9f).coerceIn(0.004f, 0.08f)
+                last = t
+                val k = 1f - exp(-dt / 0.075f)
+                val next = exp(ln(cur) + (ln(target) - ln(cur)) * k)
+                zoomShown.floatValue = next
+                applyZoom(next)
+            }
+        }
+    }
+
+    LaunchedEffect(tele, s.tele, front, camChoice, teleBroken) {
+        val t = tele ?: return@LaunchedEffect
+        if (!s.tele || front || camChoice > 0 || teleBroken) {
+            if (useTele) useTele = false
+            return@LaunchedEffect
+        }
+        snapshotFlow { zoomTarget.floatValue }.collect { z ->
+            if (!capturingNow.value) {
+                if (!useTele && z >= t.factor) useTele = true
+                else if (useTele && z < t.factor * 0.94f) useTele = false
+            }
+        }
+    }
+
+    LaunchedEffect(Bus.zoomTick) {
+        if (Bus.zoomTick > 0) {
+            val f = if (Bus.zoomUp) 1.15f else 1f / 1.15f
+            setZoom(zoomTarget.floatValue * f)
+            bump()
+        }
+    }
+
+    fun runAnalysis(b: Bitmap, rot: Int) {
+        val m = modeNow.value
+        analyzeBusy.set(true)
+        val img = InputImage.fromBitmap(b, rot)
+        if (m == Mode.DOC) {
+            recLazy.value.process(img)
+                .addOnSuccessListener { t ->
+                    var lines = 0
+                    for (blk in t.textBlocks) lines += blk.lines.size
+                    if (lines >= 4) {
+                        docFound = true
+                        docSeen = System.currentTimeMillis()
+                    }
+                }
+                .addOnCompleteListener { analyzeBusy.set(false) }
+            return
+        }
+        scanCounter = scanCounter + 1
+        val qrOn = m == Mode.PHOTO && s.qrScan
+        val sceneOn = s.scenePill
+        val doQr = qrOn && (!sceneOn || scanCounter % 2 == 0)
+        if (doQr) {
+            scanner.process(img)
+                .addOnSuccessListener { list ->
+                    val bc = list.firstOrNull()
+                    if (bc != null) {
+                        val raw = bc.rawValue ?: bc.displayValue ?: ""
+                        if (raw.isNotEmpty()) {
+                            qrSeen = System.currentTimeMillis()
+                            if (raw != qrDismissed && qr?.text != raw) {
+                                qr = makeQr(bc, raw)
+                                buzz()
+                            }
+                        }
+                    }
+                }
+                .addOnCompleteListener { analyzeBusy.set(false) }
+        } else if (sceneOn) {
+            labeler.process(img)
+                .addOnSuccessListener { labels ->
+                    val best = labels.filter { it.confidence > 0.62f }.maxByOrNull { it.confidence }
+                    if (best != null) {
+                        scene = best.text
+                        sceneSeen = System.currentTimeMillis()
+                    }
+                }
+                .addOnCompleteListener { analyzeBusy.set(false) }
+        } else {
+            analyzeBusy.set(false)
+        }
+    }
+
     LaunchedEffect(
-        mode, front, camChoice, ratio43, sizeIdx, jpegIdx, vqIdx, fpsIdx, brIdx, camPaused, qrScan, enginePref, prioIdx
+        bindCat, front, camChoice, useTele, ratioKey, capSize, maxQ, liveWanted, analysisWanted,
+        s.vqIdx, s.fpsIdx, s.brIdx, camPaused, s.engine, screenW
     ) {
+        if (screenW == 0) return@LaunchedEffect
         val provider = suspendCoroutine<ProcessCameraProvider> { c ->
             val f = ProcessCameraProvider.getInstance(ctx)
             f.addListener({ c.resume(f.get()) }, exec)
@@ -1186,28 +641,41 @@ fun CameraScreen() {
             return@LaunchedEffect
         }
         previewView.implementationMode =
-            if (mode == Mode.PANO || mode == Mode.TIMELAPSE || enginePref == 1) PreviewView.ImplementationMode.COMPATIBLE
+            if (bindCat == "p" || bindCat == "t" || s.engine == 1) PreviewView.ImplementationMode.COMPATIBLE
             else PreviewView.ImplementationMode.PERFORMANCE
 
-        val aspect = if (use43) AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
-        else AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+        val stillCat = bindCat == "i" || bindCat == "u"
+        val ratioNow = if (stillCat) ratioAr(ratioKey, screenW.toFloat() / screenH) else 0.5625f
+        val sensor169 = !stillCat || ratioNow < 0.62f
+        val aspect = if (sensor169) AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
         val previewRs = ResolutionSelector.Builder().setAspectRatioStrategy(aspect).build()
-        val longSide = sizeLong[sizeIdx]
-        val imageRsBuilder = ResolutionSelector.Builder().setAspectRatioStrategy(aspect)
+        val longSide = sizeLong[capSize]
+        val irsb = ResolutionSelector.Builder().setAspectRatioStrategy(aspect)
         if (longSide > 0) {
-            imageRsBuilder.setResolutionStrategy(
+            irsb.setResolutionStrategy(
                 ResolutionStrategy(
-                    Size(longSide, if (use43) longSide * 3 / 4 else longSide * 9 / 16),
+                    Size(longSide, if (sensor169) longSide * 9 / 16 else longSide * 3 / 4),
                     ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
                 )
             )
         }
-        val imageRs = imageRsBuilder.build()
+        val imageRs = irsb.build()
+        val anaRs = ResolutionSelector.Builder().setAspectRatioStrategy(aspect)
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    if (sensor169) Size(1280, 720) else Size(960, 720),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+                )
+            ).build()
 
-        val selector: CameraSelector = if (camChoice > 0 && camChoice <= camIds.size) {
-            val id = camIds[camChoice - 1]
+        val wantId: String? = when {
+            camChoice > 0 && camChoice <= camIds.size -> camIds[camChoice - 1]
+            !front && tele != null && s.tele && !teleBroken -> if (useTele) tele.teleId else tele.wideId
+            else -> null
+        }
+        val selector: CameraSelector = if (wantId != null) {
             CameraSelector.Builder().addCameraFilter { infos ->
-                infos.filter { Camera2CameraInfo.from(it).cameraId == id }
+                infos.filter { Camera2CameraInfo.from(it).cameraId == wantId }
             }.build()
         } else if (front) {
             CameraSelector.DEFAULT_FRONT_CAMERA
@@ -1215,16 +683,23 @@ fun CameraScreen() {
             CameraSelector.DEFAULT_BACK_CAMERA
         }
 
-        val attempts: List<Attempt> = when {
-            mode in stillModes ->
-                if (mode == Mode.PHOTO && qrScan) listOf(Attempt(true, true), Attempt(true, false))
-                else listOf(Attempt(true, false))
-            mode == Mode.VIDEO || mode == Mode.SLOMO || mode == Mode.TIMELAPSE ->
-                listOf(Attempt(true, false), Attempt(false, false))
-            else -> listOf(Attempt(false, false))
+        val attempts = ArrayList<Attempt>()
+        when (bindCat) {
+            "i", "u" -> {
+                attempts.add(Attempt(true, liveWanted, analysisWanted))
+                if (analysisWanted) attempts.add(Attempt(true, liveWanted, false))
+                if (liveWanted) attempts.add(Attempt(true, false, analysisWanted))
+                if (liveWanted && analysisWanted) attempts.add(Attempt(true, false, false))
+            }
+            "v", "s" -> {
+                attempts.add(Attempt(true, true, false))
+                attempts.add(Attempt(false, true, false))
+            }
+            else -> attempts.add(Attempt(false, false, false))
         }
 
         var bound: Camera? = null
+        var boundAt: Attempt? = null
         for (at in attempts) {
             try {
                 provider.unbindAll()
@@ -1232,77 +707,67 @@ fun CameraScreen() {
                 videoCapture = null
                 val preview = Preview.Builder().setResolutionSelector(previewRs).build()
                 preview.setSurfaceProvider(previewView.surfaceProvider)
-                val cases = mutableListOf<UseCase>(preview)
+                val group = UseCaseGroup.Builder()
+                group.addUseCase(preview)
                 var ic: ImageCapture? = null
                 var vc: VideoCapture<Recorder>? = null
-                if (mode == Mode.VIDEO || mode == Mode.SLOMO) {
-                    val q = if (mode == Mode.SLOMO) Quality.HD else vqVals[vqIdx]
-                    val rb = Recorder.Builder()
-                        .setQualitySelector(QualitySelector.from(q, FallbackStrategy.lowerQualityOrHigherThan(q)))
-                    val vb = brVals[brIdx]
-                    if (vb > 0 && mode == Mode.VIDEO) rb.setTargetVideoEncodingBitRate(vb)
+                if (at.video) {
+                    val q = if (bindCat == "v") vqVals[s.vqIdx] else Quality.HD
+                    val rb = Recorder.Builder().setQualitySelector(QualitySelector.from(q, FallbackStrategy.lowerQualityOrHigherThan(q)))
+                    val vb = brVals[s.brIdx]
+                    if (vb > 0 && bindCat == "v") rb.setTargetVideoEncodingBitRate(vb)
                     val vcb = VideoCapture.Builder(rb.build())
-                    if (mode == Mode.SLOMO) {
+                    if (bindCat == "s") {
                         vcb.setTargetFrameRate(Range(120, 240))
-                    } else if (fpsVals[fpsIdx] != 30) {
-                        vcb.setTargetFrameRate(Range(fpsVals[fpsIdx], fpsVals[fpsIdx]))
+                    } else if (bindCat == "v" && fpsVals[s.fpsIdx] != 30) {
+                        vcb.setTargetFrameRate(Range(fpsVals[s.fpsIdx], fpsVals[s.fpsIdx]))
                     }
                     val built = vcb.build()
-                    cases.add(built)
+                    group.addUseCase(built)
                     vc = built
                 }
                 if (at.analysis) {
                     val analysis = ImageAnalysis.Builder()
+                        .setResolutionSelector(anaRs)
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
                     var lastScan = 0L
                     analysis.setAnalyzer(analysisExec) { proxy ->
                         val now = System.currentTimeMillis()
-                        if (now - lastScan < 450) {
+                        if (now - lastScan < 650 || analyzeBusy.get()) {
                             proxy.close()
                         } else {
                             lastScan = now
+                            var bmp: Bitmap? = null
+                            var rot = 0
                             try {
-                                val bmp = proxy.toBitmap()
-                                val img = InputImage.fromBitmap(bmp, proxy.imageInfo.rotationDegrees)
-                                scanner.process(img)
-                                    .addOnSuccessListener { list ->
-                                        val b = list.firstOrNull()
-                                        if (b != null) {
-                                            val raw = b.rawValue ?: b.displayValue ?: ""
-                                            if (raw.isNotEmpty()) {
-                                                qrSeen = System.currentTimeMillis()
-                                                if (raw != qrDismissed && qr?.text != raw) {
-                                                    qr = makeQr(b, raw)
-                                                    buzz()
-                                                }
-                                            }
-                                        }
-                                    }
-                                    .addOnCompleteListener { proxy.close() }
+                                bmp = proxy.toBitmap()
+                                rot = proxy.imageInfo.rotationDegrees
                             } catch (e: Exception) {
-                                proxy.close()
                             }
+                            proxy.close()
+                            val b = bmp
+                            if (b != null) runAnalysis(b, rot)
                         }
                     }
-                    cases.add(analysis)
+                    group.addUseCase(analysis)
                 }
                 if (at.still) {
-                    val capMode = if (mode == Mode.NIGHT || prioIdx == 0 || jpegIdx == 0)
-                        ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                     val built = ImageCapture.Builder()
                         .setResolutionSelector(imageRs)
-                        .setCaptureMode(capMode)
-                        .setJpegQuality(jpegVals[jpegIdx])
+                        .setCaptureMode(if (maxQ) ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                        .setJpegQuality(if (bindCat == "u") 100 else jpegVals[s.jpegIdx])
                         .build()
-                    cases.add(built)
+                    group.addUseCase(built)
                     ic = built
                 }
-                bound = provider.bindToLifecycle(owner, selector, *cases.toTypedArray())
+                if (stillCat) {
+                    val rat = if (ratios[ratioKey].w == 0) Rational(screenW, screenH) else Rational(ratios[ratioKey].w, ratios[ratioKey].h)
+                    group.setViewPort(ViewPort.Builder(rat, Surface.ROTATION_0).build())
+                }
+                bound = provider.bindToLifecycle(owner, selector, group.build())
+                boundAt = at
                 imageCapture = ic
                 videoCapture = vc
-                if ((mode == Mode.VIDEO || mode == Mode.SLOMO) && !at.still) {
-                    toast("Taking photos while recording isn't supported by this camera driver")
-                }
                 break
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -1311,6 +776,12 @@ fun CameraScreen() {
 
         val cam = bound
         if (cam == null) {
+            if (useTele) {
+                teleBroken = true
+                useTele = false
+                toast("The telephoto lens isn't available to apps on this ROM. Using digital zoom.")
+                return@LaunchedEffect
+            }
             if (camChoice > 0) {
                 camChoice = 0
                 toast("That camera ID did not open. Back to Auto.")
@@ -1332,9 +803,27 @@ fun CameraScreen() {
         }
 
         camera = cam
-        zoomShown.floatValue = 1f
-        zoomTarget.floatValue = 1f
+        liveReady = boundAt?.video == true && stillCat
+        if (liveWanted && !liveReady) toast("Live photo isn't supported by this camera driver (it needs photo and video at once).")
+        if ((bindCat == "v" || bindCat == "s") && boundAt?.still == false) {
+            toast("Taking photos while recording isn't supported by this camera driver")
+        }
         ev = 0
+        delay(250)
+        val zst = cam.cameraInfo.zoomState.value
+        camMin = zst?.minZoomRatio ?: 1f
+        camMax = zst?.maxZoomRatio ?: 1f
+        camBase = if (useTele && tele != null) tele.factor else 1f
+        minZoom = camMin * camBase
+        maxZoom = if (tele != null && s.tele && !teleBroken && !front && camChoice == 0) 10f else minOf(camMax * camBase, 10f)
+        if (front != lastFront || camChoice != lastCamChoice) {
+            lastFront = front
+            lastCamChoice = camChoice
+            zoomTarget.floatValue = 1f
+            zoomShown.floatValue = 1f
+        }
+        zoomTarget.floatValue = zoomTarget.floatValue.coerceIn(minZoom, maxOf(minZoom, maxZoom))
+        zoomShown.floatValue = zoomShown.floatValue.coerceIn(minZoom, maxOf(minZoom, maxZoom))
         try {
             val c2i = Camera2CameraInfo.from(cam.cameraInfo)
             isoRange = c2i.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
@@ -1343,15 +832,16 @@ fun CameraScreen() {
             evRange = cam.cameraInfo.exposureState.exposureCompensationRange
             val ranges = c2i.getCameraCharacteristic(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
             nightFps = ranges?.filter { it.upper >= 8 }?.minByOrNull { it.upper * 1000 + it.lower }
+            val scenes = c2i.getCameraCharacteristic(CameraCharacteristics.CONTROL_AVAILABLE_SCENE_MODES)
+            hdrDriver = scenes != null && scenes.contains(CaptureRequest.CONTROL_SCENE_MODE_HDR)
             val ps = c2i.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
             val fl = c2i.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
             if (ps != null && fl != null && fl > 0f) {
                 panoFov = (2.0 * atan(minOf(ps.width, ps.height) / (2.0 * fl))).toFloat()
             }
-            if (mode == Mode.VIDEO && fpsVals[fpsIdx] > 30) {
-                val want = fpsVals[fpsIdx]
-                val offered = ranges != null && ranges.any { it.upper >= want }
-                if (!offered) {
+            if (bindCat == "v" && fpsVals[s.fpsIdx] > 30) {
+                val want = fpsVals[s.fpsIdx]
+                if (ranges == null || ranges.none { it.upper >= want }) {
                     toast("${want}fps is not offered by this camera driver. Run the 60 fps test in Camera info.")
                 }
             }
@@ -1361,10 +851,6 @@ fun CameraScreen() {
             minFocus = 0f
             evRange = null
         }
-        delay(300)
-        val zst = cam.cameraInfo.zoomState.value
-        minZoom = zst?.minZoomRatio ?: 1f
-        maxZoom = minOf(zst?.maxZoomRatio ?: 1f, 10f)
     }
 
     LaunchedEffect(flash, camera, imageCapture, mode) {
@@ -1392,17 +878,15 @@ fun CameraScreen() {
         } catch (e: Exception) {
         }
     }
-    LaunchedEffect(Bus.zoomTick) {
-        if (Bus.zoomTick > 0) {
-            val f = if (Bus.zoomUp) 1.15f else 1f / 1.15f
-            zoomTarget.floatValue = (zoomTarget.floatValue * f).coerceIn(minZoom, maxOf(minZoom, maxZoom))
-        }
-    }
 
-    LaunchedEffect(mode, camera, proWb, proManualExp, isoVal, shutNs, proManualFocus, proFocusF, minFocus, forceFps, fpsIdx, nightFps) {
+    LaunchedEffect(
+        mode, camera, proWb, proManualExp, isoVal, shutNs, proManualFocus, proFocusF, minFocus,
+        s.forceFps, s.fpsIdx, nightFps, s.hdr, s.denoise, hdrDriver
+    ) {
         val cam = camera ?: return@LaunchedEffect
         try {
             val c2 = Camera2CameraControl.from(cam.cameraControl)
+            val info = Camera2CameraInfo.from(cam.cameraInfo)
             val b = CaptureRequestOptions.Builder()
             var any = false
             if (mode == Mode.PRO) {
@@ -1421,11 +905,27 @@ fun CameraScreen() {
             if (mode == Mode.NIGHT) {
                 val nf = nightFps
                 if (nf != null) b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, nf)
-                b.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
                 any = true
             }
-            if (mode == Mode.VIDEO && forceFps && fpsVals[fpsIdx] > 30) {
-                val f = fpsVals[fpsIdx]
+            if (mode in stillModes && (s.denoise || mode == Mode.NIGHT || mode == Mode.ULTRA)) {
+                val nr = info.getCameraCharacteristic(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES)
+                if (nr != null && nr.contains(CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)) {
+                    b.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
+                    any = true
+                }
+                val ed = info.getCameraCharacteristic(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES)
+                if (ed != null && ed.contains(CaptureRequest.EDGE_MODE_HIGH_QUALITY)) {
+                    b.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
+                    any = true
+                }
+            }
+            if (s.hdr && hdrDriver && mode in stillModes && mode != Mode.PRO) {
+                b.setCaptureRequestOption(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_USE_SCENE_MODE)
+                b.setCaptureRequestOption(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_HDR)
+                any = true
+            }
+            if (mode == Mode.VIDEO && s.forceFps && fpsVals[s.fpsIdx] > 30) {
+                val f = fpsVals[s.fpsIdx]
                 b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(f, f))
                 any = true
             }
@@ -1435,97 +935,57 @@ fun CameraScreen() {
         }
     }
 
-    fun values(mime: String, dir: String): ContentValues {
-        val cv = ContentValues()
+    fun values(mime: String): android.content.ContentValues {
+        val cv = android.content.ContentValues()
         cv.put(MediaStore.MediaColumns.DISPLAY_NAME, stampNow())
         cv.put(MediaStore.MediaColumns.MIME_TYPE, mime)
-        cv.put(MediaStore.MediaColumns.RELATIVE_PATH, dir)
+        cv.put(MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/SamCam")
         return cv
     }
 
-    fun takePhoto() {
-        val ic = imageCapture ?: return
-        snd(MediaActionSound.SHUTTER_CLICK)
-        buzz()
-        if (flashAnim) {
-            scope.launch {
-                shutterAnim.snapTo(0.65f)
-                shutterAnim.animateTo(0f, tween(220))
-            }
-        }
-        val processedMode = mode == Mode.PORTRAIT || mode == Mode.DOC
-        if (processedMode) {
-            if (processing) {
-                toast("Still saving the last photo")
-                return
-            }
-            val m = mode
-            ic.takePicture(bgExec, object : ImageCapture.OnImageCapturedCallback() {
-                override fun onCaptureSuccess(image: ImageProxy) {
-                    var data: JpegData? = null
-                    try {
-                        val buf = image.planes[0].buffer
-                        val bytes = ByteArray(buf.remaining())
-                        buf.get(bytes)
-                        data = JpegData(bytes, image.imageInfo.rotationDegrees)
-                    } catch (e: Exception) {
-                    }
-                    image.close()
-                    val d = data
-                    if (d == null) {
-                        toastSafe("Could not read the photo")
-                        return
-                    }
-                    scope.launch {
-                        processing = true
-                        val uri = withContext(Dispatchers.Default) {
-                            val bmp = decodeJpeg(d, front && mirror, 2400)
-                            if (bmp == null) {
-                                null
-                            } else {
-                                val out = try {
-                                    if (m == Mode.PORTRAIT) portraitBlur(bmp, segLazy.value, blurDiv[blurIdx])
-                                    else docEnhance(bmp, docBw)
-                                } catch (e: Exception) {
-                                    bmp
-                                }
-                                saveBitmap(ctx, out, sdUri, if (m == Mode.PORTRAIT) "PORTRAIT_" else "DOC_")
-                            }
-                        }
-                        processing = false
-                        if (uri != null) setLast(uri, "image/jpeg") else toast("Could not save the photo")
-                    }
-                }
-
-                override fun onError(exception: ImageCaptureException) {
-                    toastSafe("Error: ${exception.message}")
-                }
-            })
+    fun shoot(tmp: File, cb: (Boolean) -> Unit) {
+        val ic = imageCapture
+        if (ic == null) {
+            cb(false)
             return
         }
         val meta = ImageCapture.Metadata()
-        meta.isReversedHorizontal = front && mirror
+        meta.isReversedHorizontal = front && s.mirror
+        ic.takePicture(ImageCapture.OutputFileOptions.Builder(tmp).setMetadata(meta).build(), exec, object : ImageCapture.OnImageSavedCallback {
+            override fun onImageSaved(r: ImageCapture.OutputFileResults) {
+                cb(true)
+            }
+
+            override fun onError(e: ImageCaptureException) {
+                toast("Error: ${e.message}")
+                cb(false)
+            }
+        })
+    }
+
+    fun takePlain() {
+        val ic = imageCapture ?: return
+        val meta = ImageCapture.Metadata()
+        meta.isReversedHorizontal = front && s.mirror
         val tree = sdUri
         val doc: Uri? = if (tree != null) docCreate(ctx, treeRoot(tree), "image/jpeg", "${stampNow()}.jpg") else null
-        val s: OutputStream? = if (doc != null) {
+        val os: OutputStream? = if (doc != null) {
             try {
                 ctx.contentResolver.openOutputStream(doc)
             } catch (e: Exception) {
                 null
             }
         } else null
-        if (tree != null && s == null) toast("SD folder not writable, saving to phone")
-        val builder = if (s != null) {
-            ImageCapture.OutputFileOptions.Builder(s)
+        if (tree != null && os == null) toast("SD folder not writable, saving to phone")
+        val builder = if (os != null) {
+            ImageCapture.OutputFileOptions.Builder(os)
         } else {
-            ImageCapture.OutputFileOptions.Builder(
-                ctx.contentResolver, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values("image/jpeg", "DCIM/SamCam")
-            )
+            ImageCapture.OutputFileOptions.Builder(ctx.contentResolver, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values("image/jpeg"))
         }
         ic.takePicture(builder.setMetadata(meta).build(), exec, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(r: ImageCapture.OutputFileResults) {
                 try {
-                    s?.close()
+                    os?.close()
                 } catch (e: Exception) {
                 }
                 setLast(r.savedUri ?: doc, "image/jpeg")
@@ -1533,12 +993,126 @@ fun CameraScreen() {
 
             override fun onError(e: ImageCaptureException) {
                 try {
-                    s?.close()
+                    os?.close()
                 } catch (x: Exception) {
                 }
                 toast("Error: ${e.message}")
             }
         })
+    }
+
+    suspend fun processShot(f: File, m: Mode): Uri? {
+        var bmp = decodeFile(f, if (m == Mode.ULTRA) 4200 else 3000) ?: return null
+        try {
+            if (m == Mode.PORTRAIT) {
+                bmp = portraitBlur(bmp, segLazy.value, blurDiv[s.blurIdx])
+            } else if (m == Mode.DOC) {
+                bmp = docScan(bmp, recLazy.value, s.docBw, s.docAuto)
+            }
+            val softHdr = s.hdr && !hdrDriver
+            if (m != Mode.DOC && m != Mode.PRO && (softHdr || s.ai)) bmp = toneMap(bmp, softHdr, s.ai)
+            if (s.wmOn) bmp = drawWatermark(bmp, s.wmText, s.wmDate, s.wmPos)
+        } catch (e: Throwable) {
+        }
+        val prefix = when (m) {
+            Mode.PORTRAIT -> "PORTRAIT_"
+            Mode.DOC -> "DOC_"
+            Mode.ULTRA -> "UHD_"
+            else -> "IMG_"
+        }
+        return saveBitmap(ctx, bmp, sdUri, prefix)
+    }
+
+    fun takePost(m: Mode) {
+        if (processing) {
+            toast("Still saving the last photo")
+            return
+        }
+        val tmp = File(ctx.cacheDir, "shot_" + stampNow() + ".jpg")
+        shoot(tmp) { ok ->
+            if (!ok) {
+                tmp.delete()
+            } else {
+                scope.launch {
+                    processing = true
+                    val uri = withContext(Dispatchers.Default) { processShot(tmp, m) }
+                    tmp.delete()
+                    processing = false
+                    if (uri != null) setLast(uri, "image/jpeg") else toast("Could not save the photo")
+                }
+            }
+        }
+    }
+
+    fun takeLive() {
+        val vc = videoCapture
+        if (vc == null || imageCapture == null) {
+            takePlain()
+            return
+        }
+        if (processing) {
+            toast("Still saving the last photo")
+            return
+        }
+        scope.launch {
+            processing = true
+            val id = stampNow()
+            val tv = File(ctx.cacheDir, "live_$id.mp4")
+            val tj = File(ctx.cacheDir, "live_$id.jpg")
+            val fin = CompletableDeferred<Boolean>()
+            val r: Recording? = try {
+                vc.output.prepareRecording(ctx, FileOutputOptions.Builder(tv).build()).start(exec) { e ->
+                    if (e is VideoRecordEvent.Finalize) fin.complete(!e.hasError())
+                }
+            } catch (e: Exception) {
+                null
+            }
+            if (r == null) {
+                processing = false
+                takePlain()
+                return@launch
+            }
+            delay(350)
+            val jd = CompletableDeferred<Boolean>()
+            shoot(tj) { jd.complete(it) }
+            val jok = withTimeoutOrNull(8000L) { jd.await() } == true
+            delay(1700)
+            r.stop()
+            val vok = withTimeoutOrNull(6000L) { fin.await() } == true
+            var uri: Uri? = null
+            if (jok) {
+                uri = withContext(Dispatchers.IO) {
+                    try {
+                        val jb = tj.readBytes()
+                        val out = if (vok) motionPhotoPack(jb, tv.readBytes(), 350_000L) else jb
+                        saveBytes(ctx, out, sdUri, "LIVE_$id", "image/jpeg")
+                    } catch (e: Throwable) {
+                        null
+                    }
+                }
+            }
+            tv.delete()
+            tj.delete()
+            processing = false
+            if (uri != null) setLast(uri, "image/jpeg") else toast("Could not save the live photo")
+        }
+    }
+
+    fun takePhoto() {
+        if (imageCapture == null) return
+        snd(MediaActionSound.SHUTTER_CLICK)
+        buzz()
+        if (s.flashAnim) {
+            scope.launch {
+                shutterAnim.snapTo(0.6f)
+                shutterAnim.animateTo(0f, tween(220))
+            }
+        }
+        val m = mode
+        val live = s.live && m == Mode.PHOTO && liveReady
+        val softHdr = s.hdr && !hdrDriver
+        val post = !live && (m == Mode.PORTRAIT || m == Mode.DOC || (m != Mode.PRO && (softHdr || s.ai)) || s.wmOn)
+        if (live) takeLive() else if (post) takePost(m) else takePlain()
     }
 
     fun togglePause() {
@@ -1565,8 +1139,7 @@ fun CameraScreen() {
         if (mode == Mode.SLOMO) {
             val tmp = File(ctx.cacheDir, "slomo_" + stampNow() + ".mp4")
             snd(MediaActionSound.START_VIDEO_RECORDING)
-            val pendingSlo = vc.output.prepareRecording(ctx, FileOutputOptions.Builder(tmp).build())
-            recording = pendingSlo.start(exec) { evt ->
+            recording = vc.output.prepareRecording(ctx, FileOutputOptions.Builder(tmp).build()).start(exec) { evt ->
                 if (evt is VideoRecordEvent.Finalize) {
                     recording = null
                     paused = false
@@ -1576,10 +1149,10 @@ fun CameraScreen() {
                     } else {
                         scope.launch {
                             processing = true
-                            val out = withContext(Dispatchers.IO) { openVideoOut(ctx, sdUri, stampNow() + "_SLO", "DCIM/SamCam") }
+                            val out = withContext(Dispatchers.IO) { openVideoOut(ctx, sdUri, stampNow() + "_SLO") }
                             var ok = false
                             if (out != null) {
-                                ok = withContext(Dispatchers.IO) { remuxSlow(tmp, out.pfd, slowVals[slowIdx]) }
+                                ok = withContext(Dispatchers.IO) { remuxSlow(tmp, out.pfd, slowVals[s.slowIdx]) }
                                 try {
                                     out.pfd.close()
                                 } catch (e: Exception) {
@@ -1594,14 +1167,14 @@ fun CameraScreen() {
             }
             return
         }
-        val out = openVideoOut(ctx, sdUri, stampNow(), "DCIM/SamCam")
+        val out = openVideoOut(ctx, sdUri, stampNow())
         if (out == null) {
             toast("Could not create the video file")
             return
         }
         snd(MediaActionSound.START_VIDEO_RECORDING)
         var pending = vc.output.prepareRecording(ctx, FileDescriptorOutputOptions.Builder(out.pfd).build())
-        if (mic) pending = pending.withAudioEnabled()
+        if (s.mic) pending = pending.withAudioEnabled()
         recording = pending.start(exec) { evt ->
             if (evt is VideoRecordEvent.Finalize) {
                 recording = null
@@ -1634,7 +1207,7 @@ fun CameraScreen() {
                             val sc = minOf(1f, 1920f / maxOf(bmp.width, bmp.height))
                             val w = ((bmp.width * sc).toInt() / 2) * 2
                             val h = ((bmp.height * sc).toInt() / 2) * 2
-                            val o = openVideoOut(ctx, sdUri, stampNow() + "_TL", "DCIM/SamCam")
+                            val o = openVideoOut(ctx, sdUri, stampNow() + "_TL")
                             if (o == null) {
                                 toast("Could not create the video file")
                                 break
@@ -1646,7 +1219,7 @@ fun CameraScreen() {
                         withContext(Dispatchers.Default) { e.addFrame(bmp) }
                         tlCount = tlCount + 1
                     }
-                    delay(tlVals[tlIdx] * 1000L)
+                    delay(tlVals[s.tlIdx] * 1000L)
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -1688,7 +1261,7 @@ fun CameraScreen() {
                     lastT = e.timestamp
                 }
 
-                override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+                override fun onAccuracyChanged(sn: Sensor?, a: Int) {}
             }
             sm.registerListener(listener, gyro, SensorManager.SENSOR_DELAY_GAME)
             val strips = ArrayList<Bitmap>()
@@ -1733,10 +1306,10 @@ fun CameraScreen() {
                     val outBmp = Bitmap.createBitmap(totalW, h, Bitmap.Config.ARGB_8888)
                     val cv = GCanvas(outBmp)
                     var x = 0f
-                    for (s in strips) {
-                        cv.drawBitmap(s, x, 0f, null)
-                        x += s.width
-                        s.recycle()
+                    for (st in strips) {
+                        cv.drawBitmap(st, x, 0f, null)
+                        x += st.width
+                        st.recycle()
                     }
                     saveBitmap(ctx, outBmp, sdUri, "PANO_")
                 }
@@ -1808,34 +1381,17 @@ fun CameraScreen() {
 
     fun openGallery() {
         val u = lastUri
-        if (u != null) {
-            val base = Intent(Intent.ACTION_VIEW).setDataAndType(u, lastMime)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            if (usePhotos) {
+        when (s.galleryMode) {
+            0 -> showGallery = true
+            1 -> if (u != null) openInPhotos(ctx, u, lastMime.startsWith("video")) else showGallery = true
+            else -> {
                 try {
-                    ctx.startActivity(Intent(base).setPackage("com.google.android.apps.photos"))
-                    return
+                    val li = ctx.packageManager.getLaunchIntentForPackage("com.google.android.apps.photos")
+                    if (li != null) ctx.startActivity(li) else showGallery = true
                 } catch (e: Exception) {
+                    showGallery = true
                 }
             }
-            try {
-                ctx.startActivity(base)
-                return
-            } catch (e: Exception) {
-            }
-        }
-        try {
-            val li = ctx.packageManager.getLaunchIntentForPackage("com.google.android.apps.photos")
-            if (usePhotos && li != null) {
-                ctx.startActivity(li)
-                return
-            }
-            ctx.startActivity(
-                Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_GALLERY)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-        } catch (e: Exception) {
-            toast("No gallery app found")
         }
     }
 
@@ -1856,43 +1412,13 @@ fun CameraScreen() {
         }
         if (m != mode) {
             qr = null
+            scene = null
+            docFound = false
             torch = false
             mode = m
             buzz()
         }
         animateModePos(modeOrder.indexOf(m))
-    }
-
-    fun resetAll() {
-        prefs.edit().clear().apply()
-        sizeIdx = 0
-        jpegIdx = 1
-        vqIdx = 1
-        fpsIdx = 1
-        brIdx = 0
-        tlIdx = 1
-        slowIdx = 1
-        blurIdx = 1
-        prioIdx = 0
-        enginePref = 0
-        mic = true
-        grid = false
-        volMode = 0
-        mirror = true
-        forceFps = false
-        usePhotos = true
-        shutterSound = true
-        vibrate = true
-        tapFocus = true
-        keepOn = true
-        ratio43 = true
-        flashAnim = true
-        showZoom = true
-        defFront = false
-        rememberMode = false
-        qrScan = true
-        docBw = true
-        sdUri = null
     }
 
     val modeDrag = rememberDraggableState { dx ->
@@ -1903,17 +1429,27 @@ fun CameraScreen() {
 
     LaunchedEffect(Bus.tick) { if (Bus.tick > 0) shutter() }
 
-    BackHandler(enabled = showSettings) {
+    BackHandler(enabled = showSettings && !showGallery) {
         if (showInfo) showInfo = false else showSettings = false
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black).systemBarsPadding()) {
+    val pillText: String? = when {
+        mode == Mode.DOC -> if (docFound) "Document detected" else "Align the page inside the frame"
+        s.scenePill && mode in stillModes && scene != null -> scene
+        else -> null
+    }
+
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black).systemBarsPadding()) {
+        SideEffect {
+            screenW = constraints.maxWidth
+            screenH = constraints.maxHeight
+        }
         Box(
-            Modifier.align(Alignment.TopCenter).padding(top = 56.dp).fillMaxWidth()
+            Modifier.align(Alignment.TopCenter).padding(top = if (isFull) 0.dp else 56.dp).fillMaxWidth()
                 .aspectRatio(arAnim)
-                .pointerInput(tapFocus) {
+                .pointerInput(s.tapFocus) {
                     detectTapGestures { o ->
-                        if (tapFocus) {
+                        if (s.tapFocus) {
                             val p = previewView.meteringPointFactory.createPoint(o.x, o.y)
                             camera?.cameraControl?.startFocusAndMetering(FocusMeteringAction.Builder(p).build())
                             focusPos = o
@@ -1923,12 +1459,13 @@ fun CameraScreen() {
                 }
                 .pointerInput(Unit) {
                     detectTransformGestures { _, _, z, _ ->
-                        zoomDirect(zoomShown.floatValue * z)
+                        setZoom(zoomTarget.floatValue * z)
+                        bump()
                     }
                 }
         ) {
             AndroidView({ previewView }, Modifier.fillMaxSize())
-            if (grid) {
+            if (s.grid) {
                 Canvas(Modifier.fillMaxSize()) {
                     val c = Color(0x88FFFFFF)
                     drawLine(c, Offset(size.width / 3, 0f), Offset(size.width / 3, size.height), 1f)
@@ -1942,7 +1479,7 @@ fun CameraScreen() {
                     val l = Offset(size.width * 0.08f, size.height * 0.1f)
                     val r = Offset(size.width * 0.92f, size.height * 0.9f)
                     val len = size.width * 0.1f
-                    val c = Color.White
+                    val c = if (docFound) Color(0xFF4CAF50) else Color.White
                     val sw = 6f
                     drawLine(c, l, Offset(l.x + len, l.y), strokeWidth = sw, cap = StrokeCap.Round)
                     drawLine(c, l, Offset(l.x, l.y + len), strokeWidth = sw, cap = StrokeCap.Round)
@@ -1957,9 +1494,10 @@ fun CameraScreen() {
             if (mode == Mode.PANO) {
                 Canvas(Modifier.fillMaxSize()) {
                     val y = size.height / 2
-                    drawLine(Color.White.copy(alpha = 0.8f), Offset(size.width * 0.1f, y), Offset(size.width * 0.9f, y), strokeWidth = 4f, cap = StrokeCap.Round)
-                    drawLine(Color.White.copy(alpha = 0.8f), Offset(size.width * 0.9f, y), Offset(size.width * 0.84f, y - 14f), strokeWidth = 4f, cap = StrokeCap.Round)
-                    drawLine(Color.White.copy(alpha = 0.8f), Offset(size.width * 0.9f, y), Offset(size.width * 0.84f, y + 14f), strokeWidth = 4f, cap = StrokeCap.Round)
+                    val c = Color.White.copy(alpha = 0.8f)
+                    drawLine(c, Offset(size.width * 0.1f, y), Offset(size.width * 0.9f, y), strokeWidth = 4f, cap = StrokeCap.Round)
+                    drawLine(c, Offset(size.width * 0.9f, y), Offset(size.width * 0.84f, y - 14f), strokeWidth = 4f, cap = StrokeCap.Round)
+                    drawLine(c, Offset(size.width * 0.9f, y), Offset(size.width * 0.84f, y + 14f), strokeWidth = 4f, cap = StrokeCap.Round)
                 }
             }
             Canvas(Modifier.fillMaxSize()) {
@@ -1967,19 +1505,19 @@ fun CameraScreen() {
                 val fp = focusPos
                 if (fp != null && fv < 1f) {
                     val a = if (fv < 0.7f) 1f else 1f - (fv - 0.7f) / 0.3f
-                    val r = 80f - 36f * minOf(1f, fv * 3f)
-                    drawCircle(YELLOW.copy(alpha = a), radius = r, center = fp, style = Stroke(4f))
+                    val rr = 80f - 36f * minOf(1f, fv * 3f)
+                    drawCircle(YELLOW.copy(alpha = a), radius = rr, center = fp, style = Stroke(4f))
                 }
             }
             if (countdown > 0) {
                 Text("$countdown", Modifier.align(Alignment.Center), color = Color.White, fontSize = 96.sp)
             }
-            Box(Modifier.fillMaxSize().graphicsLayer { alpha = switchAlpha.value }.background(Color.Black))
+            Box(Modifier.align(Alignment.Center)) { BigZoom({ zoomShown.floatValue }, rulerShown) }
+            Box(Modifier.fillMaxSize().graphicsLayer { alpha = coverAlpha }.background(Color.Black))
             Box(Modifier.fillMaxSize().graphicsLayer { alpha = shutterAnim.value }.background(Color.Black))
-
             val qv = qr
             if (qv != null && mode == Mode.PHOTO) {
-                Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 66.dp)) {
+                Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)) {
                     QrPill(qv.label, {
                         if (qv.kind == 2 && qv.ssid != null) {
                             toast(connectWifi(ctx, qv.ssid, qv.pass, qv.wifiType, qv.hidden))
@@ -1999,19 +1537,6 @@ fun CameraScreen() {
                     })
                 }
             }
-
-            if (showZoom && maxZoom - minZoom > 0.05f && mode != Mode.PANO) {
-                ZoomOverlay(
-                    zoom = { zoomShown.floatValue },
-                    minZ = minZoom,
-                    maxZ = maxZoom,
-                    rulerTick = { rulerBump.intValue },
-                    onDirect = { zoomDirect(it) },
-                    onPreset = { zoomTarget.floatValue = it },
-                    onBump = { rulerBump.intValue = rulerBump.intValue + 1 },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
         }
 
         AnimatedVisibility(
@@ -2020,8 +1545,7 @@ fun CameraScreen() {
             enter = fadeIn(), exit = fadeOut()
         ) {
             Row(
-                Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000))
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000)).padding(horizontal = 16.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (panoOn) {
@@ -2029,7 +1553,7 @@ fun CameraScreen() {
                 } else if (holdStill && !capturing) {
                     Text("Hold still…", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 } else if (processing && !capturing) {
-                    Text("Saving…", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Text(if (s.live && mode == Mode.PHOTO) "Live photo…" else "Saving…", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 } else {
                     Box(Modifier.size(10.dp).clip(CircleShape).background(if (paused) YELLOW else Color(0xFFE53935)))
                     Spacer(Modifier.width(8.dp))
@@ -2060,28 +1584,39 @@ fun CameraScreen() {
                 ) {
                     IconBox({ showSettings = true }, false) { GearIcon() }
                     when (m) {
-                        Mode.PHOTO, Mode.PRO, Mode.PORTRAIT, Mode.NIGHT, Mode.DOC -> {
+                        Mode.PHOTO -> {
                             IconBox({ flash = (flash + 1) % 3 }, flash != 0) { FlashIcon(flash) }
                             IconBox({ timer = timerVals[(timerVals.indexOf(timer) + 1) % timerVals.size] }, timer != 0) { TimerIcon(timer) }
-                            IconBox({ ratio43 = !ratio43 }, false) { TextIcon(if (ratio43) "3:4" else "9:16", false) }
-                            IconBox({ sizeIdx = (sizeIdx + 1) % sizeNames.size }, false) { TextIcon(sizeNames[sizeIdx], false) }
+                            IconBox({ s.ratioIdx = (s.ratioIdx + 1) % ratios.size }, false) { TextIcon(ratios[s.ratioIdx].label, false) }
+                            IconBox({ s.live = !s.live }, s.live) { LiveIcon(s.live) }
+                            IconBox({ s.hdr = !s.hdr }, s.hdr) { TextIcon("HDR", s.hdr) }
+                        }
+                        Mode.PRO, Mode.PORTRAIT, Mode.NIGHT -> {
+                            IconBox({ flash = (flash + 1) % 3 }, flash != 0) { FlashIcon(flash) }
+                            IconBox({ timer = timerVals[(timerVals.indexOf(timer) + 1) % timerVals.size] }, timer != 0) { TimerIcon(timer) }
+                            IconBox({ s.ratioIdx = (s.ratioIdx + 1) % ratios.size }, false) { TextIcon(ratios[s.ratioIdx].label, false) }
+                            IconBox({ s.sizeIdx = (s.sizeIdx + 1) % sizeNames.size }, false) { TextIcon(sizeNames[s.sizeIdx], false) }
+                        }
+                        Mode.ULTRA, Mode.DOC -> {
+                            IconBox({ flash = (flash + 1) % 3 }, flash != 0) { FlashIcon(flash) }
+                            IconBox({ timer = timerVals[(timerVals.indexOf(timer) + 1) % timerVals.size] }, timer != 0) { TimerIcon(timer) }
+                            IconBox({ s.ratioIdx = (s.ratioIdx + 1) % ratios.size }, false) { TextIcon(ratios[s.ratioIdx].label, false) }
                         }
                         Mode.VIDEO -> {
                             IconBox({ torch = !torch }, torch) { FlashIcon(if (torch) 2 else 0) }
-                            IconBox({ vqIdx = (vqIdx + 1) % vqNames.size }, false) { TextIcon(vqNames[vqIdx], false) }
-                            IconBox({ fpsIdx = (fpsIdx + 1) % fpsVals.size }, forceFps && fpsVals[fpsIdx] > 30) {
-                                TextIcon("${fpsVals[fpsIdx]}fps", forceFps && fpsVals[fpsIdx] > 30)
+                            IconBox({ s.vqIdx = (s.vqIdx + 1) % vqNames.size }, false) { TextIcon(vqNames[s.vqIdx], false) }
+                            IconBox({ s.fpsIdx = (s.fpsIdx + 1) % fpsVals.size }, s.forceFps && fpsVals[s.fpsIdx] > 30) {
+                                TextIcon("${fpsVals[s.fpsIdx]}fps", s.forceFps && fpsVals[s.fpsIdx] > 30)
                             }
                         }
                         Mode.SLOMO -> {
                             IconBox({ torch = !torch }, torch) { FlashIcon(if (torch) 2 else 0) }
-                            IconBox({ slowIdx = (slowIdx + 1) % slowVals.size }, false) { TextIcon(slowNames[slowIdx] + " slower", false) }
+                            IconBox({ s.slowIdx = (s.slowIdx + 1) % slowVals.size }, false) { TextIcon(slowNames[s.slowIdx] + " slower", false) }
                         }
                         Mode.TIMELAPSE -> {
                             IconBox({ torch = !torch }, torch) { FlashIcon(if (torch) 2 else 0) }
                             IconBox({ timer = timerVals[(timerVals.indexOf(timer) + 1) % timerVals.size] }, timer != 0) { TimerIcon(timer) }
-                            IconBox({ ratio43 = !ratio43 }, false) { TextIcon(if (ratio43) "3:4" else "9:16", false) }
-                            IconBox({ tlIdx = (tlIdx + 1) % tlVals.size }, false) { TextIcon("${tlVals[tlIdx]}s", false) }
+                            IconBox({ s.tlIdx = (s.tlIdx + 1) % tlVals.size }, false) { TextIcon("${tlVals[s.tlIdx]}s", false) }
                         }
                         Mode.PANO -> {
                         }
@@ -2090,22 +1625,16 @@ fun CameraScreen() {
             }
         }
 
+        AnimatedVisibility(
+            visible = pillText != null && !capturing,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 62.dp),
+            enter = fadeIn(), exit = fadeOut()
+        ) {
+            InfoPill(pillText ?: "", mode == Mode.DOC && docFound)
+        }
+
         Column(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 12.dp)
-                .draggable(
-                    state = modeDrag,
-                    orientation = Orientation.Horizontal,
-                    onDragStarted = { modeAnim?.cancel() },
-                    onDragStopped = { v ->
-                        if (capturing || countdown > 0) {
-                            animateModePos(modeOrder.indexOf(mode))
-                        } else {
-                            val proj = modePos.floatValue - v / itemPx * 0.18f
-                            val t = proj.roundToInt().coerceIn(0, modeOrder.size - 1)
-                            selectMode(modeOrder[t])
-                        }
-                    }
-                ),
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             AnimatedVisibility(visible = mode == Mode.PRO && !capturing) {
@@ -2148,8 +1677,39 @@ fun CameraScreen() {
                 }
             }
 
+            if (s.showZoom && maxZoom - minZoom > 0.05f && mode != Mode.PANO) {
+                ZoomBar(
+                    zoom = { zoomShown.floatValue },
+                    minZ = minZoom, maxZ = maxZoom,
+                    tele = if (tele != null && s.tele && !teleBroken && !front) tele.factor else null,
+                    rulerShown = rulerShown,
+                    onPreset = { setZoom(it) },
+                    onSet = { setZoom(it) },
+                    onBump = { bump() }
+                )
+            } else {
+                Spacer(Modifier.height(46.dp))
+            }
+
             AnimatedVisibility(visible = !capturing) {
-                ModeStrip({ modePos.floatValue }, modeOrder, itemW) { selectMode(it) }
+                Box(
+                    Modifier.fillMaxWidth().draggable(
+                        state = modeDrag,
+                        orientation = Orientation.Horizontal,
+                        onDragStarted = { modeAnim?.cancel() },
+                        onDragStopped = { v ->
+                            if (capturing || countdown > 0) {
+                                animateModePos(modeOrder.indexOf(mode))
+                            } else {
+                                val proj = modePos.floatValue - v / itemPx * 0.18f
+                                val t = proj.roundToInt().coerceIn(0, modeOrder.size - 1)
+                                selectMode(modeOrder[t])
+                            }
+                        }
+                    )
+                ) {
+                    ModeStrip({ modePos.floatValue }, modeOrder, itemW) { selectMode(it) }
+                }
             }
             Spacer(Modifier.height(10.dp))
 
@@ -2207,7 +1767,7 @@ fun CameraScreen() {
             exit = slideOutHorizontally(animationSpec = tween(220)) { it } + fadeOut()
         ) {
             Box(Modifier.fillMaxSize().background(Color(0xFF0B0B0D)).clickable { }) {
-                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 12.dp)) {
+                Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 12.dp)) {
                     Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         PressBox({ if (showInfo) showInfo = false else showSettings = false }, Modifier.size(44.dp)) {
                             Text("‹", color = Color.White, fontSize = 30.sp)
@@ -2257,37 +1817,51 @@ fun CameraScreen() {
                         }
                     } else {
                         SectionTitle("Pictures")
-                        OptionRow("Photo size", sizeNames[sizeIdx]) { sizeIdx = (sizeIdx + 1) % sizeNames.size }
-                        OptionRow("Photo quality (JPEG)", jpegNames[jpegIdx]) { jpegIdx = (jpegIdx + 1) % jpegNames.size }
-                        OptionRow("Portrait blur strength", blurNames[blurIdx]) { blurIdx = (blurIdx + 1) % blurNames.size }
-                        SwitchRow("Document mode: black & white", "Off keeps color with a contrast boost", docBw) { docBw = it }
-                        SwitchRow("Scan QR codes in Photo mode", "Show a button when a QR code is in view", qrScan) { qrScan = it }
-                        SwitchRow("Save selfies as previewed", "Keep the mirror image of front camera photos", mirror) { mirror = it }
-                        SwitchRow("Grid lines", "Show a 3x3 grid in the viewfinder", grid) { grid = it }
-                        SwitchRow("Shutter flash animation", "Briefly dim the viewfinder when a photo is taken", flashAnim) { flashAnim = it }
+                        OptionRow("Aspect ratio", ratios[s.ratioIdx].label) { s.ratioIdx = (s.ratioIdx + 1) % ratios.size }
+                        OptionRow("Photo size", sizeNames[s.sizeIdx]) { s.sizeIdx = (s.sizeIdx + 1) % sizeNames.size }
+                        OptionRow("Photo quality (JPEG)", jpegNames[s.jpegIdx]) { s.jpegIdx = (s.jpegIdx + 1) % jpegNames.size }
+                        SwitchRow("Live photo", "Photo mode: saves a short motion clip with the photo (Motion Photo)", s.live) { s.live = it }
+                        SwitchRow("HDR", if (hdrDriver) "Uses the camera driver's HDR scene mode" else "Software tone-mapping (driver has no HDR mode)", s.hdr) { s.hdr = it }
+                        SwitchRow("AI enhancement", "Boosts colour and contrast after capture", s.ai) { s.ai = it }
+                        SwitchRow("Denoiser", "Asks the driver for high-quality noise reduction and sharpening", s.denoise) { s.denoise = it }
+                        SwitchRow("Scene recognition pill", "Shows what the camera is looking at", s.scenePill) { s.scenePill = it }
+                        SwitchRow("Scan QR codes in Photo mode", "Show a button when a QR code is in view", s.qrScan) { s.qrScan = it }
+                        SwitchRow("Telephoto lens", if (tele != null) "Switches to the 2x lens when you zoom in (camera ${tele.teleId})" else "Not exposed to apps on this ROM", s.tele) { s.tele = it }
+                        OptionRow("Portrait blur strength", blurNames[s.blurIdx]) { s.blurIdx = (s.blurIdx + 1) % blurNames.size }
+                        SwitchRow("Document: auto flatten", "Straightens and crops the page using the detected text", s.docAuto) { s.docAuto = it }
+                        SwitchRow("Document: black & white", "Off keeps colour with a contrast boost", s.docBw) { s.docBw = it }
+                        SwitchRow("Save selfies as previewed", "Keep the mirror image of front camera photos", s.mirror) { s.mirror = it }
+                        SwitchRow("Grid lines", "Show a 3x3 grid in the viewfinder", s.grid) { s.grid = it }
+                        SwitchRow("Shutter flash animation", "Briefly dim the viewfinder when a photo is taken", s.flashAnim) { s.flashAnim = it }
+
+                        SectionTitle("Watermark")
+                        SwitchRow("Add watermark", "Stamp your text on photos", s.wmOn) { s.wmOn = it }
+                        TextRow("Watermark text", s.wmText) { s.wmText = it }
+                        SwitchRow("Include date and time", "Adds a second line with the time", s.wmDate) { s.wmDate = it }
+                        OptionRow("Watermark position", wmPosNames[s.wmPos]) { s.wmPos = (s.wmPos + 1) % wmPosNames.size }
 
                         SectionTitle("Videos")
-                        OptionRow("Video resolution", vqNames[vqIdx]) { vqIdx = (vqIdx + 1) % vqNames.size }
-                        OptionRow("Video frame rate", "${fpsVals[fpsIdx]} fps") { fpsIdx = (fpsIdx + 1) % fpsVals.size }
-                        SwitchRow("Force 60 fps (experimental)", "Send a raw 60 fps request. Turn off if the preview freezes", forceFps) { forceFps = it }
-                        OptionRow("Video bitrate", brNames[brIdx]) { brIdx = (brIdx + 1) % brNames.size }
-                        SwitchRow("Record audio", "Use the microphone when recording videos", mic) { mic = it }
-                        OptionRow("Slow motion speed", slowNames[slowIdx] + " slower") { slowIdx = (slowIdx + 1) % slowVals.size }
-                        OptionRow("Time-lapse interval", "${tlVals[tlIdx]} s") { tlIdx = (tlIdx + 1) % tlVals.size }
+                        OptionRow("Video resolution", vqNames[s.vqIdx]) { s.vqIdx = (s.vqIdx + 1) % vqNames.size }
+                        OptionRow("Video frame rate", "${fpsVals[s.fpsIdx]} fps") { s.fpsIdx = (s.fpsIdx + 1) % fpsVals.size }
+                        SwitchRow("Force 60 fps (experimental)", "Send a raw 60 fps request. Turn off if the preview freezes", s.forceFps) { s.forceFps = it }
+                        OptionRow("Video bitrate", brNames[s.brIdx]) { s.brIdx = (s.brIdx + 1) % brNames.size }
+                        SwitchRow("Record audio", "Use the microphone when recording videos", s.mic) { s.mic = it }
+                        OptionRow("Slow motion speed", slowNames[s.slowIdx] + " slower") { s.slowIdx = (s.slowIdx + 1) % slowVals.size }
+                        OptionRow("Time-lapse interval", "${tlVals[s.tlIdx]} s") { s.tlIdx = (s.tlIdx + 1) % tlVals.size }
 
                         SectionTitle("Useful features")
-                        OptionRow("Volume keys", volNames[volMode]) { volMode = (volMode + 1) % volNames.size }
-                        SwitchRow("Tap to focus", "Tap the viewfinder to focus", tapFocus) { tapFocus = it }
-                        SwitchRow("Shutter sound", "Play a sound when taking photos and videos", shutterSound) { shutterSound = it }
-                        SwitchRow("Vibration feedback", "Vibrate when pressing the shutter and changing modes", vibrate) { vibrate = it }
-                        SwitchRow("Keep screen on", "Prevent the screen from turning off while the camera is open", keepOn) { keepOn = it }
-                        SwitchRow("Show zoom controls", "Show the zoom pill and ruler in the viewfinder", showZoom) { showZoom = it }
-                        SwitchRow("Start with front camera", "Open the app using the selfie camera", defFront) { defFront = it }
-                        SwitchRow("Remember last mode", "Open in the mode you used last", rememberMode) { rememberMode = it }
+                        OptionRow("Volume keys", volNames[s.volMode]) { s.volMode = (s.volMode + 1) % volNames.size }
+                        SwitchRow("Tap to focus", "Tap the viewfinder to focus", s.tapFocus) { s.tapFocus = it }
+                        SwitchRow("Shutter sound", "Play a sound when taking photos and videos", s.sound) { s.sound = it }
+                        SwitchRow("Vibration feedback", "Vibrate when pressing the shutter and changing modes", s.vibe) { s.vibe = it }
+                        SwitchRow("Keep screen on", "Prevent the screen from turning off while the camera is open", s.keepOn) { s.keepOn = it }
+                        SwitchRow("Show zoom controls", "Show the zoom pill and ruler", s.showZoom) { s.showZoom = it }
+                        SwitchRow("Start with front camera", "Open the app using the selfie camera", s.defFront) { s.defFront = it }
+                        SwitchRow("Remember last mode", "Open in the mode you used last", s.restoreMode) { s.restoreMode = it }
 
-                        SectionTitle("Storage")
+                        SectionTitle("Storage and gallery")
                         OptionRow("Storage location", if (sdUri == null) "Phone" else "Chosen folder") {
-                            Toast.makeText(ctx, "Open your SD card, pick or create a folder, then tap Use this folder", Toast.LENGTH_LONG).show()
+                            Toast.makeText(ctx, "Open your SD card, pick or create a folder named SamCam, then tap Use this folder", Toast.LENGTH_LONG).show()
                             pickFolder.launch(null)
                         }
                         if (sdUri != null) {
@@ -2296,11 +1870,11 @@ fun CameraScreen() {
                                 sdUri = null
                             }
                         }
-                        OptionRow("Gallery button opens", if (usePhotos) "Google Photos" else "Default gallery") { usePhotos = !usePhotos }
+                        OptionRow("Gallery button opens", galleryNames[s.galleryMode]) { s.galleryMode = (s.galleryMode + 1) % galleryNames.size }
 
                         SectionTitle("Camera engine")
-                        OptionRow("Preview engine", engineNames[enginePref]) { enginePref = (enginePref + 1) % engineNames.size }
-                        OptionRow("Capture priority", prioNames[prioIdx]) { prioIdx = (prioIdx + 1) % prioNames.size }
+                        OptionRow("Preview engine", engineNames[s.engine]) { s.engine = (s.engine + 1) % engineNames.size }
+                        OptionRow("Capture priority", prioNames[s.prioIdx]) { s.prioIdx = (s.prioIdx + 1) % prioNames.size }
                         OptionRow("Camera ID", if (camChoice == 0) "Auto" else "ID ${camIds[camChoice - 1]}") {
                             if (!capturing) camChoice = (camChoice + 1) % (camIds.size + 1)
                         }
@@ -2311,409 +1885,18 @@ fun CameraScreen() {
                         )
 
                         SectionTitle("Reset")
-                        OptionRow("Reset settings", "Reset") { resetAll() }
+                        OptionRow("Reset settings", "Reset") {
+                            s.resetAll()
+                            sdUri = null
+                        }
                         Spacer(Modifier.height(24.dp))
                     }
                 }
             }
         }
-    }
-}
 
-@Composable
-fun RecTimer(elapsed: () -> Long, paused: Boolean) {
-    Text(
-        fmtTime(elapsed()), color = if (paused) YELLOW else Color.White,
-        fontSize = 18.sp, fontWeight = FontWeight.Bold
-    )
-}
-
-@Composable
-fun QrPill(label: String, onTap: () -> Unit, onClose: () -> Unit) {
-    Row(
-        Modifier.clip(RoundedCornerShape(50)).background(YELLOW).padding(start = 18.dp, end = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            label, color = Color.Black, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = 210.dp).clickable { onTap() }.padding(vertical = 11.dp)
-        )
-        PressBox(onClose, Modifier.size(34.dp)) { Text("✕", color = Color.Black, fontSize = 15.sp) }
-    }
-}
-
-@Composable
-fun ZoomOverlay(
-    zoom: () -> Float,
-    minZ: Float,
-    maxZ: Float,
-    rulerTick: () -> Int,
-    onDirect: (Float) -> Unit,
-    onPreset: (Float) -> Unit,
-    onBump: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var rulerVisible by remember { mutableStateOf(false) }
-    val tick = rulerTick()
-    LaunchedEffect(tick) {
-        if (tick > 0) {
-            rulerVisible = true
-            delay(1700)
-            rulerVisible = false
+        AnimatedVisibility(visible = showGallery, enter = fadeIn(), exit = fadeOut()) {
+            GalleryViewer(lastUri, lastMime.startsWith("video")) { showGallery = false }
         }
-    }
-    val presets = remember(minZ, maxZ) {
-        val l = ArrayList<Float>()
-        if (minZ < 0.95f) l.add(minZ)
-        l.add(1f)
-        if (maxZ >= 1.95f) l.add(2f)
-        if (maxZ >= 4.9f) l.add(5f)
-        if (maxZ >= 9.9f) l.add(10f)
-        l
-    }
-    val z = zoom()
-    Box(modifier) {
-        AnimatedVisibility(
-            visible = rulerVisible,
-            modifier = Modifier.align(Alignment.Center),
-            enter = fadeIn(tween(120)), exit = fadeOut(tween(450))
-        ) {
-            Text(fmtZoom(z), color = Color.White, fontSize = 46.sp, fontWeight = FontWeight.Light)
-        }
-        Column(
-            Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            if (rulerVisible) {
-                ZoomRuler(zoom, minZ, maxZ, onDirect, onBump)
-            } else {
-                var active = 0
-                presets.forEachIndexed { i, p -> if (z >= p - 0.02f) active = i }
-                Row(
-                    Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000))
-                        .padding(horizontal = 6.dp, vertical = 4.dp)
-                        .pointerInput(Unit) {
-                            detectHorizontalDragGestures(onDragStart = { onBump() }) { _, _ -> onBump() }
-                        },
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    presets.forEachIndexed { i, p ->
-                        val sel = i == active
-                        PressBox({ onPreset(p) }, Modifier.defaultMinSize(minWidth = 38.dp, minHeight = 38.dp), sel) {
-                            Text(
-                                if (sel) fmtZoom(z) else fmtPreset(p),
-                                color = if (sel) YELLOW else Color.White, fontSize = 13.sp,
-                                fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
-                                modifier = Modifier.padding(horizontal = 6.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ZoomRuler(zoom: () -> Float, minZ: Float, maxZ: Float, onDirect: (Float) -> Unit, onBump: () -> Unit) {
-    val lnMin = ln(minZ)
-    val lnMax = ln(maxZ)
-    var widthPx by remember { mutableFloatStateOf(1f) }
-    Canvas(
-        Modifier.fillMaxWidth(0.7f).height(44.dp)
-            .onSizeChanged { widthPx = it.width.toFloat() }
-            .pointerInput(minZ, maxZ) {
-                detectHorizontalDragGestures(onDragStart = { onBump() }) { change, dx ->
-                    change.consume()
-                    val next = ln(zoom()) + dx / widthPx * (lnMax - lnMin)
-                    onDirect(exp(next).coerceIn(minZ, maxZ))
-                }
-            }
-    ) {
-        val w = size.width
-        val h = size.height
-        val n = 41
-        for (i in 0 until n) {
-            val x = w * i / (n - 1)
-            val major = i % 5 == 0
-            val half = if (major) 14f else 9f
-            drawLine(
-                Color.White.copy(alpha = if (major) 0.95f else 0.6f),
-                Offset(x, h * 0.5f - half), Offset(x, h * 0.5f + half), strokeWidth = 3f
-            )
-        }
-        val f = ((ln(zoom()) - lnMin) / (lnMax - lnMin)).coerceIn(0f, 1f)
-        drawLine(YELLOW, Offset(w * f, h * 0.5f - 22f), Offset(w * f, h * 0.5f + 22f), strokeWidth = 7f, cap = StrokeCap.Round)
-    }
-}
-
-@Composable
-fun PressBox(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    selected: Boolean = false,
-    content: @Composable BoxScope.() -> Unit
-) {
-    val src = remember { MutableInteractionSource() }
-    val pressed by src.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.86f else 1f,
-        animationSpec = spring(stiffness = Spring.StiffnessMedium), label = "press"
-    )
-    val bg by animateColorAsState(
-        targetValue = if (pressed) Color(0x55FFFFFF) else if (selected) Color(0x38FFFFFF) else Color.Transparent,
-        animationSpec = tween(150), label = "pillbg"
-    )
-    Box(
-        modifier
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(50))
-            .background(bg)
-            .clickable(interactionSource = src, indication = null, onClick = onClick),
-        contentAlignment = Alignment.Center,
-        content = content
-    )
-}
-
-@Composable
-fun IconBox(onClick: () -> Unit, selected: Boolean, content: @Composable BoxScope.() -> Unit) {
-    PressBox(onClick, Modifier.defaultMinSize(minWidth = 44.dp, minHeight = 44.dp), selected, content)
-}
-
-@Composable
-fun ModePill(label: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    val src = remember { MutableInteractionSource() }
-    val pressed by src.collectIsPressedAsState()
-    val bg by animateColorAsState(
-        targetValue = if (selected) Color(0x40FFFFFF) else if (pressed) Color(0x22FFFFFF) else Color.Transparent,
-        animationSpec = tween(220), label = "modebg"
-    )
-    val tc by animateColorAsState(
-        targetValue = if (selected) YELLOW else Color(0xCCFFFFFF),
-        animationSpec = tween(220), label = "modetxt"
-    )
-    val sc by animateFloatAsState(targetValue = if (pressed) 0.9f else 1f, label = "modescale")
-    Box(
-        modifier
-            .graphicsLayer { scaleX = sc; scaleY = sc }
-            .padding(vertical = 4.dp, horizontal = 4.dp)
-            .clip(RoundedCornerShape(50))
-            .background(bg)
-            .clickable(interactionSource = src, indication = null, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            label, color = tc, fontSize = 14.sp, maxLines = 1,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-        )
-    }
-}
-
-@Composable
-fun ModeStrip(posProvider: () -> Float, order: List<Mode>, itemW: Dp, onTap: (Mode) -> Unit) {
-    val pos = posProvider()
-    val itemPx = with(LocalDensity.current) { itemW.toPx() }
-    Box(Modifier.fillMaxWidth().height(44.dp).clipToBounds(), contentAlignment = Alignment.Center) {
-        Box(Modifier.width(itemW).height(34.dp).clip(RoundedCornerShape(50)).background(Color(0x40FFFFFF)))
-        order.forEachIndexed { i, m ->
-            val d = i - pos
-            val dist = abs(d)
-            if (dist < 3.4f) {
-                val sel = (1f - dist).coerceIn(0f, 1f)
-                val tc = lerp(Color(0xCCFFFFFF), YELLOW, sel)
-                val a = (1.15f - dist * 0.32f).coerceIn(0.25f, 1f)
-                val sc = 0.92f + 0.08f * sel
-                Box(
-                    Modifier.width(itemW).height(44.dp)
-                        .offset { IntOffset((d * itemPx).roundToInt(), 0) }
-                        .graphicsLayer { alpha = a; scaleX = sc; scaleY = sc }
-                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onTap(m) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        m.label, color = tc, fontSize = 13.sp, maxLines = 1,
-                        fontWeight = if (sel > 0.5f) FontWeight.Bold else FontWeight.Normal
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ShutterButton(video: Boolean, capturing: Boolean, onClick: () -> Unit) {
-    val src = remember { MutableInteractionSource() }
-    val pressed by src.collectIsPressedAsState()
-    val ringScale by animateFloatAsState(targetValue = if (pressed) 0.93f else 1f, label = "ring")
-    val inner by animateDpAsState(
-        targetValue = if (capturing) 30.dp else if (pressed) 52.dp else 62.dp,
-        animationSpec = tween(160), label = "inner"
-    )
-    val corner by animateDpAsState(
-        targetValue = if (capturing) 7.dp else 40.dp,
-        animationSpec = tween(200), label = "corner"
-    )
-    val col by animateColorAsState(
-        targetValue = if (video || capturing) Color(0xFFE53935) else Color.White,
-        animationSpec = tween(200), label = "shutcol"
-    )
-    Box(
-        Modifier.size(78.dp)
-            .graphicsLayer { scaleX = ringScale; scaleY = ringScale }
-            .clip(CircleShape)
-            .border(4.dp, Color.White, CircleShape)
-            .clickable(interactionSource = src, indication = null, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Box(Modifier.size(inner).clip(RoundedCornerShape(corner)).background(col))
-    }
-}
-
-@Composable
-fun GearIcon() {
-    Canvas(Modifier.size(24.dp)) {
-        val r = size.minDimension / 2
-        val ctr = center
-        val sw = r * 0.16f
-        drawCircle(Color.White, radius = r * 0.36f, center = ctr, style = Stroke(sw))
-        for (i in 0 until 8) {
-            val a = Math.toRadians(i * 45.0)
-            val dx = Math.cos(a).toFloat()
-            val dy = Math.sin(a).toFloat()
-            drawLine(
-                Color.White,
-                Offset(ctr.x + dx * r * 0.58f, ctr.y + dy * r * 0.58f),
-                Offset(ctr.x + dx * r * 0.88f, ctr.y + dy * r * 0.88f),
-                strokeWidth = sw * 1.6f, cap = StrokeCap.Round
-            )
-        }
-    }
-}
-
-@Composable
-fun FlashIcon(state: Int) {
-    val col = if (state == 0) Color.White else YELLOW
-    Box(contentAlignment = Alignment.Center) {
-        Canvas(Modifier.size(24.dp)) {
-            val w = size.width
-            val h = size.height
-            val p = Path()
-            p.moveTo(w * 0.60f, h * 0.05f)
-            p.lineTo(w * 0.22f, h * 0.56f)
-            p.lineTo(w * 0.46f, h * 0.56f)
-            p.lineTo(w * 0.38f, h * 0.95f)
-            p.lineTo(w * 0.78f, h * 0.40f)
-            p.lineTo(w * 0.54f, h * 0.40f)
-            p.close()
-            drawPath(p, col, style = Stroke(w * 0.08f))
-            if (state == 0) {
-                drawLine(Color.White, Offset(w * 0.1f, h * 0.9f), Offset(w * 0.9f, h * 0.1f), strokeWidth = w * 0.08f, cap = StrokeCap.Round)
-            }
-        }
-        if (state == 1) {
-            Text("A", color = col, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.BottomEnd))
-        }
-    }
-}
-
-@Composable
-fun TimerIcon(seconds: Int) {
-    val col = if (seconds == 0) Color.White else YELLOW
-    Box(contentAlignment = Alignment.Center) {
-        Canvas(Modifier.size(24.dp)) {
-            val r = size.minDimension / 2
-            val ctr = Offset(size.width / 2, size.height * 0.56f)
-            val sw = r * 0.14f
-            drawCircle(col, radius = r * 0.78f, center = ctr, style = Stroke(sw))
-            drawLine(col, Offset(size.width * 0.4f, size.height * 0.06f), Offset(size.width * 0.6f, size.height * 0.06f), strokeWidth = sw, cap = StrokeCap.Round)
-            drawLine(col, ctr, Offset(ctr.x + r * 0.3f, ctr.y - r * 0.35f), strokeWidth = sw, cap = StrokeCap.Round)
-        }
-        if (seconds > 0) {
-            Text("$seconds", color = col, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.BottomEnd))
-        }
-    }
-}
-
-@Composable
-fun TextIcon(label: String, active: Boolean) {
-    val col = if (active) YELLOW else Color.White
-    Box(Modifier.border(1.5.dp, col, RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 3.dp)) {
-        Text(label, color = col, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-    }
-}
-
-@Composable
-fun FlipIcon() {
-    Canvas(Modifier.size(28.dp)) {
-        val r = size.minDimension * 0.34f
-        val ctr = center
-        val sw = size.minDimension * 0.08f
-        val head = size.minDimension * 0.16f
-        val topLeft = Offset(ctr.x - r, ctr.y - r)
-        val arcSize = androidx.compose.ui.geometry.Size(r * 2, r * 2)
-        for (k in 0..1) {
-            val start = 200f + 180f * k
-            val sweep = 130f
-            drawArc(
-                color = Color.White, startAngle = start, sweepAngle = sweep, useCenter = false,
-                topLeft = topLeft, size = arcSize, style = Stroke(width = sw, cap = StrokeCap.Round)
-            )
-            val a = Math.toRadians((start + sweep).toDouble())
-            val nx = Math.cos(a).toFloat()
-            val ny = Math.sin(a).toFloat()
-            val px = ctr.x + r * nx
-            val py = ctr.y + r * ny
-            val tx = -ny
-            val ty = nx
-            val path = Path()
-            path.moveTo(px + tx * head, py + ty * head)
-            path.lineTo(px + nx * head * 0.7f, py + ny * head * 0.7f)
-            path.lineTo(px - nx * head * 0.7f, py - ny * head * 0.7f)
-            path.close()
-            drawPath(path, Color.White)
-        }
-    }
-}
-
-@Composable
-fun ProSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Color.White, fontSize = 12.sp, modifier = Modifier.width(90.dp))
-        Slider(value = value, onValueChange = onChange, valueRange = range, modifier = Modifier.weight(1f).height(28.dp))
-    }
-}
-
-@Composable
-fun SectionTitle(t: String) {
-    Text(t, color = YELLOW, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 22.dp, bottom = 4.dp))
-}
-
-@Composable
-fun OptionRow(title: String, value: String, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onClick() }.padding(vertical = 14.dp, horizontal = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(title, color = Color.White, fontSize = 16.sp, modifier = Modifier.weight(1f))
-        Text(value, color = YELLOW, fontSize = 15.sp)
-    }
-}
-
-@Composable
-fun SwitchRow(title: String, sub: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onChange(!checked) }.padding(vertical = 10.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(title, color = Color.White, fontSize = 16.sp)
-            Text(sub, color = Color(0x99FFFFFF), fontSize = 12.sp)
-        }
-        Spacer(Modifier.width(12.dp))
-        Switch(
-            checked = checked, onCheckedChange = onChange,
-            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = YELLOW)
-        )
     }
 }
