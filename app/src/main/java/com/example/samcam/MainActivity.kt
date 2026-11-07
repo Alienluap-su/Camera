@@ -329,6 +329,10 @@ fun CameraScreen() {
     var panoOn by remember { mutableStateOf(false) }
     var panoStrips by remember { mutableIntStateOf(0) }
     var panoFov by remember { mutableFloatStateOf(0.9f) }
+    var panoRight by remember { mutableStateOf(true) }
+    var panoDrift by remember { mutableFloatStateOf(0f) }
+    var panoThumb by remember { mutableStateOf<Bitmap?>(null) }
+    var panoMsg by remember { mutableStateOf("") }
     var processing by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf<Recording?>(null) }
     var paused by remember { mutableStateOf(false) }
@@ -1252,12 +1256,22 @@ fun CameraScreen() {
         }
         panoOn = true
         panoStrips = 0
+        panoDrift = 0f
+        panoThumb = null
+        panoMsg = ""
         scope.launch {
             var yaw = 0.0
+            var pitch = 0.0
+            var rate = 0.0
             var lastT = 0L
             val listener = object : SensorEventListener {
                 override fun onSensorChanged(e: SensorEvent) {
-                    if (lastT != 0L) yaw += e.values[1] * (e.timestamp - lastT) / 1e9
+                    if (lastT != 0L) {
+                        val dt = (e.timestamp - lastT) / 1e9
+                        pitch += e.values[0] * dt
+                        yaw += e.values[1] * dt
+                    }
+                    rate = e.values[1].toDouble()
                     lastT = e.timestamp
                 }
 
@@ -1265,36 +1279,73 @@ fun CameraScreen() {
             }
             sm.registerListener(listener, gyro, SensorManager.SENSOR_DELAY_GAME)
             val strips = ArrayList<Bitmap>()
+            val tiny = ArrayList<Bitmap>()
+            val thumbH = 160
             var dir = 0
             var lastYaw = 0.0
             var total = 0
             try {
                 while (isActive && panoOn) {
                     delay(70)
+                    panoDrift = Math.toDegrees(pitch).toFloat()
+                    val speed = abs(Math.toDegrees(rate))
                     val bmp = previewView.bitmap
                     if (bmp == null) continue
                     val d = yaw - lastYaw
                     val sgn = if (d > 0) 1 else -1
                     val px = (abs(d) * bmp.width / panoFov).toInt()
-                    if (dir == 0 && px >= 20) dir = sgn
+                    var wrong = false
+                    if (dir == 0 && px >= 20) {
+                        dir = sgn
+                        panoRight = dir < 0
+                    }
                     if (dir != 0 && sgn != dir && px >= 4) {
                         lastYaw = yaw
+                        wrong = true
                     } else if (dir != 0 && px >= 14) {
                         val sw = px.coerceAtMost(bmp.width / 2)
                         val x0 = (bmp.width - sw) / 2
                         val strip = Bitmap.createBitmap(bmp, x0, 0, sw, bmp.height)
-                        if (dir > 0) strips.add(0, strip) else strips.add(strip)
+                        val tsc = thumbH.toFloat() / bmp.height
+                        val small = Bitmap.createScaledBitmap(strip, maxOf(1, (sw * tsc).toInt()), thumbH, true)
+                        if (dir > 0) {
+                            strips.add(0, strip)
+                            tiny.add(0, small)
+                        } else {
+                            strips.add(strip)
+                            tiny.add(small)
+                        }
                         total += sw
                         lastYaw = yaw
                         panoStrips = strips.size
+                        var tw = 0
+                        for (x in tiny) tw += x.width
+                        val tb = Bitmap.createBitmap(maxOf(1, tw), thumbH, Bitmap.Config.ARGB_8888)
+                        val tc = GCanvas(tb)
+                        var tx = 0f
+                        for (x in tiny) {
+                            tc.drawBitmap(x, tx, 0f, null)
+                            tx += x.width
+                        }
+                        panoThumb = tb
                         if (total > 11000) panoOn = false
+                    }
+                    panoMsg = when {
+                        dir == 0 -> ""
+                        wrong -> if (panoRight) "Move to the right" else "Move to the left"
+                        speed > 55.0 -> "Slow down"
+                        abs(panoDrift) > 5f -> "Keep the line level"
+                        else -> "Keep going"
                     }
                     bmp.recycle()
                 }
             } finally {
                 sm.unregisterListener(listener)
                 panoOn = false
+                panoMsg = ""
             }
+            tiny.forEach { it.recycle() }
+            panoThumb = null
             if (strips.size < 3) {
                 strips.forEach { it.recycle() }
                 toast("Pan slowly across the scene to capture a panorama")
@@ -1449,7 +1500,12 @@ fun CameraScreen() {
                 .aspectRatio(arAnim)
                 .pointerInput(s.tapFocus) {
                     detectTapGestures { o ->
-                        if (s.tapFocus) {
+                        if (mode == Mode.PANO) {
+                            if (!panoOn) {
+                                panoRight = !panoRight
+                                buzz()
+                            }
+                        } else if (s.tapFocus) {
                             val p = previewView.meteringPointFactory.createPoint(o.x, o.y)
                             camera?.cameraControl?.startFocusAndMetering(FocusMeteringAction.Builder(p).build())
                             focusPos = o
@@ -1491,15 +1547,7 @@ fun CameraScreen() {
                     drawLine(c, r, Offset(r.x, r.y - len), strokeWidth = sw, cap = StrokeCap.Round)
                 }
             }
-            if (mode == Mode.PANO) {
-                Canvas(Modifier.fillMaxSize()) {
-                    val y = size.height / 2
-                    val c = Color.White.copy(alpha = 0.8f)
-                    drawLine(c, Offset(size.width * 0.1f, y), Offset(size.width * 0.9f, y), strokeWidth = 4f, cap = StrokeCap.Round)
-                    drawLine(c, Offset(size.width * 0.9f, y), Offset(size.width * 0.84f, y - 14f), strokeWidth = 4f, cap = StrokeCap.Round)
-                    drawLine(c, Offset(size.width * 0.9f, y), Offset(size.width * 0.84f, y + 14f), strokeWidth = 4f, cap = StrokeCap.Round)
-                }
-            }
+            if (mode == Mode.PANO) PanoGuide(panoOn, panoRight, panoThumb, { panoDrift }, panoMsg)
             Canvas(Modifier.fillMaxSize()) {
                 val fv = focusAnimV.value
                 val fp = focusPos
