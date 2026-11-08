@@ -402,6 +402,7 @@ fun BigZoom(zoom: () -> Float, visible: Boolean) {
 @Composable
 fun ZoomBar(
     zoom: () -> Float,
+    target: () -> Float,
     minZ: Float,
     maxZ: Float,
     tele: Float?,
@@ -420,17 +421,22 @@ fun ZoomBar(
         l
     }
     val z = zoom()
+    val lnSpan = ln(maxZ) - ln(minZ)
     Box(Modifier.fillMaxWidth().height(46.dp), contentAlignment = Alignment.Center) {
         if (rulerShown) {
-            ZoomRuler(zoom, minZ, maxZ, onSet, onBump)
+            ZoomRuler(zoom, target, minZ, maxZ, onSet, onBump)
         } else {
             var active = 0
             presets.forEachIndexed { i, p -> if (z >= p - 0.02f) active = i }
             Row(
                 Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000))
                     .padding(horizontal = 6.dp, vertical = 4.dp)
-                    .pointerInput(Unit) {
-                        detectHorizontalDragGestures(onDragStart = { onBump() }) { _, _ -> onBump() }
+                    .pointerInput(minZ, maxZ) {
+                        detectHorizontalDragGestures(onDragStart = { onBump() }) { change, dx ->
+                            change.consume()
+                            onSet(exp(ln(target()) + dx * lnSpan / 420f).coerceIn(minZ, maxZ))
+                            onBump()
+                        }
                     },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -452,7 +458,7 @@ fun ZoomBar(
 }
 
 @Composable
-fun ZoomRuler(zoom: () -> Float, minZ: Float, maxZ: Float, onSet: (Float) -> Unit, onBump: () -> Unit) {
+fun ZoomRuler(zoom: () -> Float, target: () -> Float, minZ: Float, maxZ: Float, onSet: (Float) -> Unit, onBump: () -> Unit) {
     val lnMin = ln(minZ)
     val lnMax = ln(maxZ)
     var widthPx by remember { mutableFloatStateOf(1f) }
@@ -462,8 +468,9 @@ fun ZoomRuler(zoom: () -> Float, minZ: Float, maxZ: Float, onSet: (Float) -> Uni
             .pointerInput(minZ, maxZ) {
                 detectHorizontalDragGestures(onDragStart = { onBump() }) { change, dx ->
                     change.consume()
-                    val next = ln(zoom()) + dx / widthPx * (lnMax - lnMin)
+                    val next = ln(target()) + dx / widthPx * (lnMax - lnMin) * 1.4f
                     onSet(exp(next).coerceIn(minZ, maxZ))
+                    onBump()
                 }
             }
     ) {
@@ -502,11 +509,15 @@ fun LogoMark(dp: Dp) {
 
 @Composable
 fun Splash() {
-    Box(Modifier.fillMaxSize().background(Color(0xFF0E1116)), Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Box(Modifier.fillMaxSize().background(Color(0xFF0E1116))) {
+        Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
             LogoMark(110.dp)
             Spacer(Modifier.height(16.dp))
             Text("Camera", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Medium)
         }
+        Text(
+            "developed by Alienluap", color = Color(0x88FFFFFF), fontSize = 11.sp,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp)
+        )
     }
 }
