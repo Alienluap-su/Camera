@@ -7,13 +7,37 @@ android {
     namespace = "com.example.samcam"
     compileSdk = 35
     defaultConfig {
-        applicationId = "com.example.samcam"
+        applicationId = "com.alienluap.camera"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4"
+        versionCode = 5
+        versionName = "0.5"
+        buildConfigField("String", "CERT_SHA", "\"${providers.gradleProperty("certSha").getOrElse("")}\"")
     }
-    buildFeatures { compose = true }
+    signingConfigs {
+        create("release") {
+            val ks = providers.gradleProperty("ksPath").orNull
+            if (ks != null) {
+                storeFile = file(ks)
+                storePassword = providers.gradleProperty("ksPass").get()
+                keyAlias = "alienluap"
+                keyPassword = providers.gradleProperty("ksPass").get()
+                storeType = "pkcs12"
+            }
+        }
+    }
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
 }
