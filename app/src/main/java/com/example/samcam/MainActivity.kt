@@ -133,6 +133,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -174,6 +175,12 @@ class Attempt(val still: Boolean, val video: Boolean, val analysis: Boolean)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!Integrity.ok(this)) {
+            Toast.makeText(this, "This copy is not the original app. Please install the official version.", Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
+        ProcessCameraProvider.getInstance(applicationContext)
         enableEdgeToEdge()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent { MaterialTheme(colorScheme = darkColorScheme()) { Root() } }
@@ -209,11 +216,19 @@ fun Root() {
     var splash by remember { mutableStateOf(true) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { ok = granted() }
     LaunchedEffect(Unit) { if (!ok) launcher.launch(ask) }
-    LaunchedEffect(Unit) { delay(1300); splash = false }
+    val rootScope = rememberCoroutineScope()
+    val t0 = remember { System.currentTimeMillis() }
+    LaunchedEffect(Unit) { delay(2200); splash = false }
     if (ok) {
         Box(Modifier.fillMaxSize()) {
-            CameraScreen()
-            AnimatedVisibility(visible = splash, enter = fadeIn(), exit = fadeOut(tween(400))) { Splash() }
+            CameraScreen {
+                rootScope.launch {
+                    val el = System.currentTimeMillis() - t0
+                    if (el < 500) delay(500 - el)
+                    splash = false
+                }
+            }
+            AnimatedVisibility(visible = splash, enter = fadeIn(), exit = fadeOut(tween(250))) { Splash() }
         }
     } else {
         Box(Modifier.fillMaxSize().background(Color.Black), Alignment.Center) {
@@ -224,7 +239,7 @@ fun Root() {
 
 @SuppressLint("MissingPermission")
 @Composable
-fun CameraScreen() {
+fun CameraScreen(onReady: () -> Unit) {
     val ctx = LocalContext.current
     val owner = ctx as ComponentActivity
     val scope = rememberCoroutineScope()
@@ -242,8 +257,8 @@ fun CameraScreen() {
             implementationMode = PreviewView.ImplementationMode.PERFORMANCE
         }
     }
-    val scanner = remember { BarcodeScanning.getClient() }
-    val labeler = remember { ImageLabeling.getClient(ImageLabelerOptions.DEFAULT_OPTIONS) }
+    val scannerLazy = remember { lazy { BarcodeScanning.getClient() } }
+    val labelerLazy = remember { lazy { ImageLabeling.getClient(ImageLabelerOptions.DEFAULT_OPTIONS) } }
     val recLazy = remember { lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) } }
     val segLazy = remember {
         lazy { Segmentation.getClient(SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()) }
@@ -269,7 +284,9 @@ fun CameraScreen() {
         }
         found
     }
-    val tele = remember { detectTele(ctx) }
+    val teleState = remember { mutableStateOf<TeleInfo?>(null) }
+    val tele = teleState.value
+    LaunchedEffect(Unit) { teleState.value = withContext(Dispatchers.IO) { detectTele(ctx) } }
     val modeOrder = remember { Mode.values().toList() }
     val itemW = 104.dp
     val itemPx = with(androidx.compose.ui.platform.LocalDensity.current) { itemW.toPx() }
@@ -343,9 +360,12 @@ fun CameraScreen() {
     var useTele by remember { mutableStateOf(false) }
     var teleBroken by remember { mutableStateOf(false) }
     var hdrDriver by remember { mutableStateOf(false) }
+    var oisAvail by remember { mutableStateOf(false) }
+    var eisAvail by remember { mutableStateOf(false) }
     val zoomTarget = remember { mutableFloatStateOf(1f) }
     val zoomShown = remember { mutableFloatStateOf(1f) }
     val rulerBump = remember { mutableIntStateOf(0) }
+    var zoomFast by remember { mutableStateOf(false) }
     var rulerShown by remember { mutableStateOf(false) }
     var minZoom by remember { mutableFloatStateOf(1f) }
     var maxZoom by remember { mutableFloatStateOf(1f) }
@@ -394,15 +414,16 @@ fun CameraScreen() {
         else -> "i"
     }
     val isStillCat = bindCat == "i" || bindCat == "u"
-    val usesRatio = isStillCat || bindCat == "t"
-    val ratioKey = if (isStillCat) s.ratioIdx else -1
+    val usesRatio = isStillCat || bindCat == "t" || bindCat == "v" || bindCat == "s"
+    val ratioKey = if (isStillCat) s.ratioIdx else if (bindCat == "v" || bindCat == "s") s.vRatioIdx else -1
     val capSize = if (bindCat == "u") 0 else s.sizeIdx
     val maxQ = mode == Mode.NIGHT || mode == Mode.ULTRA || s.prioIdx == 0 || s.jpegIdx == 0
     val liveWanted = s.live && mode == Mode.PHOTO
     val analysisWanted = isStillCat && ((mode == Mode.PHOTO && s.qrScan) || s.scenePill || mode == Mode.DOC)
     val fullAr = if (screenH > 0) screenW.toFloat() / screenH else 0.5f
-    val arTarget = if (usesRatio) ratioAr(s.ratioIdx, fullAr) else 0.5625f
-    val isFull = usesRatio && ratios[s.ratioIdx].w == 0
+    val ratioIdxNow = if (bindCat == "v" || bindCat == "s") s.vRatioIdx else s.ratioIdx
+    val arTarget = if (usesRatio) ratioAr(ratioIdxNow, fullAr) else 0.5625f
+    val isFull = usesRatio && ratios[ratioIdxNow].w == 0
     val arAnim by animateFloatAsState(targetValue = arTarget, animationSpec = tween(280), label = "ar")
 
     val ir = isoRange
@@ -443,12 +464,16 @@ fun CameraScreen() {
         rulerBump.intValue = rulerBump.intValue + 1
     }
 
-    fun setZoom(z: Float) {
+    fun setZoom(z: Float, fast: Boolean = false) {
+        zoomFast = fast
         zoomTarget.floatValue = z.coerceIn(minZoom, maxOf(minZoom, maxZoom))
     }
 
     DisposableEffect(Unit) {
-        val obs = Observer<PreviewView.StreamState> { st -> streaming = st == PreviewView.StreamState.STREAMING }
+        val obs = Observer<PreviewView.StreamState> { st ->
+            streaming = st == PreviewView.StreamState.STREAMING
+            if (streaming) onReady()
+        }
         previewView.previewStreamState.observe(owner, obs)
         onDispose { previewView.previewStreamState.removeObserver(obs) }
     }
@@ -546,7 +571,7 @@ fun CameraScreen() {
                 val t = androidx.compose.runtime.withFrameNanos { it }
                 val dt = if (last == 0L) 0.016f else ((t - last) / 1e9f).coerceIn(0.004f, 0.08f)
                 last = t
-                val k = 1f - exp(-dt / 0.075f)
+                val k = 1f - exp(-dt / (if (zoomFast) 0.03f else 0.075f))
                 val next = exp(ln(cur) + (ln(target) - ln(cur)) * k)
                 zoomShown.floatValue = next
                 applyZoom(next)
@@ -598,7 +623,7 @@ fun CameraScreen() {
         val sceneOn = s.scenePill
         val doQr = qrOn && (!sceneOn || scanCounter % 2 == 0)
         if (doQr) {
-            scanner.process(img)
+            scannerLazy.value.process(img)
                 .addOnSuccessListener { list ->
                     val bc = list.firstOrNull()
                     if (bc != null) {
@@ -614,7 +639,7 @@ fun CameraScreen() {
                 }
                 .addOnCompleteListener { analyzeBusy.set(false) }
         } else if (sceneOn) {
-            labeler.process(img)
+            labelerLazy.value.process(img)
                 .addOnSuccessListener { labels ->
                     val best = labels.filter { it.confidence > 0.62f }.maxByOrNull { it.confidence }
                     if (best != null) {
@@ -649,7 +674,7 @@ fun CameraScreen() {
             else PreviewView.ImplementationMode.PERFORMANCE
 
         val stillCat = bindCat == "i" || bindCat == "u"
-        val ratioNow = if (stillCat) ratioAr(ratioKey, screenW.toFloat() / screenH) else 0.5625f
+        val ratioNow = if (ratioKey >= 0) ratioAr(ratioKey, screenW.toFloat() / screenH) else 0.5625f
         val sensor169 = !stillCat || ratioNow < 0.62f
         val aspect = if (sensor169) AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
         val previewRs = ResolutionSelector.Builder().setAspectRatioStrategy(aspect).build()
@@ -764,7 +789,7 @@ fun CameraScreen() {
                     group.addUseCase(built)
                     ic = built
                 }
-                if (stillCat) {
+                if (ratioKey >= 0) {
                     val rat = if (ratios[ratioKey].w == 0) Rational(screenW, screenH) else Rational(ratios[ratioKey].w, ratios[ratioKey].h)
                     group.setViewPort(ViewPort.Builder(rat, Surface.ROTATION_0).build())
                 }
@@ -818,8 +843,6 @@ fun CameraScreen() {
         camMin = zst?.minZoomRatio ?: 1f
         camMax = zst?.maxZoomRatio ?: 1f
         camBase = if (useTele && tele != null) tele.factor else 1f
-        minZoom = camMin * camBase
-        maxZoom = if (tele != null && s.tele && !teleBroken && !front && camChoice == 0) 10f else minOf(camMax * camBase, 10f)
         if (front != lastFront || camChoice != lastCamChoice) {
             lastFront = front
             lastCamChoice = camChoice
@@ -838,6 +861,10 @@ fun CameraScreen() {
             nightFps = ranges?.filter { it.upper >= 8 }?.minByOrNull { it.upper * 1000 + it.lower }
             val scenes = c2i.getCameraCharacteristic(CameraCharacteristics.CONTROL_AVAILABLE_SCENE_MODES)
             hdrDriver = scenes != null && scenes.contains(CaptureRequest.CONTROL_SCENE_MODE_HDR)
+            val oisModes = c2i.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+            oisAvail = oisModes != null && oisModes.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+            val eisModes = c2i.getCameraCharacteristic(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+            eisAvail = eisModes != null && eisModes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
             val ps = c2i.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
             val fl = c2i.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
             if (ps != null && fl != null && fl > 0f) {
@@ -855,6 +882,12 @@ fun CameraScreen() {
             minFocus = 0f
             evRange = null
         }
+    }
+
+    LaunchedEffect(tele, s.tele, teleBroken, front, camChoice, camMin, camMax, camBase) {
+        minZoom = camMin * camBase
+        maxZoom = if (tele != null && s.tele && !teleBroken && !front && camChoice == 0) 10f else minOf(camMax * camBase, 10f)
+        zoomTarget.floatValue = zoomTarget.floatValue.coerceIn(minZoom, maxOf(minZoom, maxZoom))
     }
 
     LaunchedEffect(flash, camera, imageCapture, mode) {
@@ -885,7 +918,7 @@ fun CameraScreen() {
 
     LaunchedEffect(
         mode, camera, proWb, proManualExp, isoVal, shutNs, proManualFocus, proFocusF, minFocus,
-        s.forceFps, s.fpsIdx, nightFps, s.hdr, s.denoise, hdrDriver
+        s.forceFps, s.fpsIdx, nightFps, s.hdr, s.denoise, hdrDriver, s.ois, s.eis, oisAvail, eisAvail
     ) {
         val cam = camera ?: return@LaunchedEffect
         try {
@@ -931,6 +964,14 @@ fun CameraScreen() {
             if (mode == Mode.VIDEO && s.forceFps && fpsVals[s.fpsIdx] > 30) {
                 val f = fpsVals[s.fpsIdx]
                 b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(f, f))
+                any = true
+            }
+            if (s.ois && oisAvail) {
+                b.setCaptureRequestOption(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                any = true
+            }
+            if (s.eis && eisAvail && (mode == Mode.VIDEO || mode == Mode.SLOMO || mode == Mode.TIMELAPSE)) {
+                b.setCaptureRequestOption(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
                 any = true
             }
             if (any) c2.setCaptureRequestOptions(b.build()) else c2.clearCaptureRequestOptions()
@@ -1076,11 +1117,13 @@ fun CameraScreen() {
                 takePlain()
                 return@launch
             }
+            val tLive = System.currentTimeMillis()
             delay(350)
             val jd = CompletableDeferred<Boolean>()
             shoot(tj) { jd.complete(it) }
             val jok = withTimeoutOrNull(8000L) { jd.await() } == true
-            delay(1700)
+            val rem = liveMsVals[s.liveIdx] - (System.currentTimeMillis() - tLive)
+            if (rem > 0) delay(rem)
             r.stop()
             val vok = withTimeoutOrNull(6000L) { fin.await() } == true
             var uri: Uri? = null
@@ -1280,55 +1323,63 @@ fun CameraScreen() {
             sm.registerListener(listener, gyro, SensorManager.SENSOR_DELAY_GAME)
             val strips = ArrayList<Bitmap>()
             val tiny = ArrayList<Bitmap>()
-            val thumbH = 160
+            val thumbH = 72
             var dir = 0
             var lastYaw = 0.0
             var total = 0
             try {
                 while (isActive && panoOn) {
-                    delay(70)
-                    panoDrift = Math.toDegrees(pitch).toFloat()
+                    delay(33)
+                    val dg = Math.toDegrees(pitch).toFloat()
+                    if (abs(dg - panoDrift) > 0.2f) panoDrift = dg
                     val speed = abs(Math.toDegrees(rate))
-                    val bmp = previewView.bitmap
-                    if (bmp == null) continue
+                    val vw = previewView.width
+                    if (vw <= 0) continue
                     val d = yaw - lastYaw
                     val sgn = if (d > 0) 1 else -1
-                    val px = (abs(d) * bmp.width / panoFov).toInt()
-                    var wrong = false
+                    val px = (abs(d) * vw / panoFov).toInt()
                     if (dir == 0 && px >= 20) {
                         dir = sgn
                         panoRight = dir < 0
                     }
+                    var wrong = false
                     if (dir != 0 && sgn != dir && px >= 4) {
                         lastYaw = yaw
                         wrong = true
-                    } else if (dir != 0 && px >= 14) {
-                        val sw = px.coerceAtMost(bmp.width / 2)
-                        val x0 = (bmp.width - sw) / 2
-                        val strip = Bitmap.createBitmap(bmp, x0, 0, sw, bmp.height)
-                        val tsc = thumbH.toFloat() / bmp.height
-                        val small = Bitmap.createScaledBitmap(strip, maxOf(1, (sw * tsc).toInt()), thumbH, true)
-                        if (dir > 0) {
-                            strips.add(0, strip)
-                            tiny.add(0, small)
-                        } else {
-                            strips.add(strip)
-                            tiny.add(small)
+                    } else if (dir != 0 && px >= 10) {
+                        val bmp = previewView.bitmap
+                        if (bmp != null) {
+                            val scale = bmp.width.toFloat() / vw
+                            val sw = (px * scale).toInt().coerceIn(4, bmp.width / 2)
+                            val x0 = (bmp.width - sw) / 2
+                            val strip = Bitmap.createBitmap(bmp, x0, 0, sw, bmp.height)
+                            bmp.recycle()
+                            val tsc = thumbH.toFloat() / strip.height
+                            val small = Bitmap.createScaledBitmap(strip, maxOf(1, (sw * tsc).toInt()), thumbH, true)
+                            if (dir > 0) {
+                                strips.add(0, strip)
+                                tiny.add(0, small)
+                            } else {
+                                strips.add(strip)
+                                tiny.add(small)
+                            }
+                            total += sw
+                            lastYaw += (sgn * (sw / scale) * panoFov / vw).toDouble()
+                            panoStrips = strips.size
+                            if (strips.size % 3 == 0) {
+                                var tw = 0
+                                for (x in tiny) tw += x.width
+                                val tb = Bitmap.createBitmap(maxOf(1, tw), thumbH, Bitmap.Config.ARGB_8888)
+                                val tc = GCanvas(tb)
+                                var tx = 0f
+                                for (x in tiny) {
+                                    tc.drawBitmap(x, tx, 0f, null)
+                                    tx += x.width
+                                }
+                                panoThumb = tb
+                            }
+                            if (total > 11000) panoOn = false
                         }
-                        total += sw
-                        lastYaw = yaw
-                        panoStrips = strips.size
-                        var tw = 0
-                        for (x in tiny) tw += x.width
-                        val tb = Bitmap.createBitmap(maxOf(1, tw), thumbH, Bitmap.Config.ARGB_8888)
-                        val tc = GCanvas(tb)
-                        var tx = 0f
-                        for (x in tiny) {
-                            tc.drawBitmap(x, tx, 0f, null)
-                            tx += x.width
-                        }
-                        panoThumb = tb
-                        if (total > 11000) panoOn = false
                     }
                     panoMsg = when {
                         dir == 0 -> ""
@@ -1337,7 +1388,6 @@ fun CameraScreen() {
                         abs(panoDrift) > 5f -> "Keep the line level"
                         else -> "Keep going"
                     }
-                    bmp.recycle()
                 }
             } finally {
                 sm.unregisterListener(listener)
@@ -1515,7 +1565,7 @@ fun CameraScreen() {
                 }
                 .pointerInput(Unit) {
                     detectTransformGestures { _, _, z, _ ->
-                        setZoom(zoomTarget.floatValue * z)
+                        setZoom(zoomTarget.floatValue * z, true)
                         bump()
                     }
                 }
@@ -1568,7 +1618,7 @@ fun CameraScreen() {
                 Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)) {
                     QrPill(qv.label, {
                         if (qv.kind == 2 && qv.ssid != null) {
-                            toast(connectWifi(ctx, qv.ssid, qv.pass, qv.wifiType, qv.hidden))
+                            toast(connectWifi(ctx, qv.ssid, qv.pass, qv.wifiType, qv.hidden, s.wifiManual))
                         } else if (qv.kind == 1) {
                             try {
                                 ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(qv.text)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -1656,15 +1706,18 @@ fun CameraScreen() {
                             IconBox({ s.fpsIdx = (s.fpsIdx + 1) % fpsVals.size }, s.forceFps && fpsVals[s.fpsIdx] > 30) {
                                 TextIcon("${fpsVals[s.fpsIdx]}fps", s.forceFps && fpsVals[s.fpsIdx] > 30)
                             }
+                            IconBox({ s.vRatioIdx = (s.vRatioIdx + 1) % ratios.size }, false) { TextIcon(ratios[s.vRatioIdx].label, false) }
                         }
                         Mode.SLOMO -> {
                             IconBox({ torch = !torch }, torch) { FlashIcon(if (torch) 2 else 0) }
                             IconBox({ s.slowIdx = (s.slowIdx + 1) % slowVals.size }, false) { TextIcon(slowNames[s.slowIdx] + " slower", false) }
+                            IconBox({ s.vRatioIdx = (s.vRatioIdx + 1) % ratios.size }, false) { TextIcon(ratios[s.vRatioIdx].label, false) }
                         }
                         Mode.TIMELAPSE -> {
                             IconBox({ torch = !torch }, torch) { FlashIcon(if (torch) 2 else 0) }
                             IconBox({ timer = timerVals[(timerVals.indexOf(timer) + 1) % timerVals.size] }, timer != 0) { TimerIcon(timer) }
                             IconBox({ s.tlIdx = (s.tlIdx + 1) % tlVals.size }, false) { TextIcon("${tlVals[s.tlIdx]}s", false) }
+                            IconBox({ s.ratioIdx = (s.ratioIdx + 1) % ratios.size }, false) { TextIcon(ratios[s.ratioIdx].label, false) }
                         }
                         Mode.PANO -> {
                         }
@@ -1728,11 +1781,12 @@ fun CameraScreen() {
             if (s.showZoom && maxZoom - minZoom > 0.05f && mode != Mode.PANO) {
                 ZoomBar(
                     zoom = { zoomShown.floatValue },
+                    target = { zoomTarget.floatValue },
                     minZ = minZoom, maxZ = maxZoom,
                     tele = if (tele != null && s.tele && !teleBroken && !front) tele.factor else null,
                     rulerShown = rulerShown,
-                    onPreset = { setZoom(it) },
-                    onSet = { setZoom(it) },
+                    onPreset = { setZoom(it, false) },
+                    onSet = { setZoom(it, true) },
                     onBump = { bump() }
                 )
             } else {
@@ -1869,11 +1923,13 @@ fun CameraScreen() {
                         OptionRow("Photo size", sizeNames[s.sizeIdx]) { s.sizeIdx = (s.sizeIdx + 1) % sizeNames.size }
                         OptionRow("Photo quality (JPEG)", jpegNames[s.jpegIdx]) { s.jpegIdx = (s.jpegIdx + 1) % jpegNames.size }
                         SwitchRow("Live photo", "Photo mode: saves a short motion clip with the photo (Motion Photo)", s.live) { s.live = it }
+                        OptionRow("Live photo length", liveNames[s.liveIdx]) { s.liveIdx = (s.liveIdx + 1) % liveNames.size }
                         SwitchRow("HDR", if (hdrDriver) "Uses the camera driver's HDR scene mode" else "Software tone-mapping (driver has no HDR mode)", s.hdr) { s.hdr = it }
                         SwitchRow("AI enhancement", "Boosts colour and contrast after capture", s.ai) { s.ai = it }
                         SwitchRow("Denoiser", "Asks the driver for high-quality noise reduction and sharpening", s.denoise) { s.denoise = it }
                         SwitchRow("Scene recognition pill", "Shows what the camera is looking at", s.scenePill) { s.scenePill = it }
                         SwitchRow("Scan QR codes in Photo mode", "Show a button when a QR code is in view", s.qrScan) { s.qrScan = it }
+                        SwitchRow("Wi-Fi QR: add manually", "Opens Wi-Fi settings and copies the password so Android saves the network itself", s.wifiManual) { s.wifiManual = it }
                         SwitchRow("Telephoto lens", if (tele != null) "Switches to the 2x lens when you zoom in (camera ${tele.teleId})" else "Not exposed to apps on this ROM", s.tele) { s.tele = it }
                         OptionRow("Portrait blur strength", blurNames[s.blurIdx]) { s.blurIdx = (s.blurIdx + 1) % blurNames.size }
                         SwitchRow("Document: auto flatten", "Straightens and crops the page using the detected text", s.docAuto) { s.docAuto = it }
@@ -1890,6 +1946,9 @@ fun CameraScreen() {
 
                         SectionTitle("Videos")
                         OptionRow("Video resolution", vqNames[s.vqIdx]) { s.vqIdx = (s.vqIdx + 1) % vqNames.size }
+                        OptionRow("Video aspect ratio", ratios[s.vRatioIdx].label) { s.vRatioIdx = (s.vRatioIdx + 1) % ratios.size }
+                        SwitchRow("Optical stabilization (OIS)", if (oisAvail) "Uses the lens stabilizer" else "Not offered by this camera driver", s.ois) { s.ois = it }
+                        SwitchRow("Video stabilization (EIS)", if (eisAvail) "Digital stabilization for videos (crops the frame slightly)" else "Not offered by this camera driver", s.eis) { s.eis = it }
                         OptionRow("Video frame rate", "${fpsVals[s.fpsIdx]} fps") { s.fpsIdx = (s.fpsIdx + 1) % fpsVals.size }
                         SwitchRow("Force 60 fps (experimental)", "Send a raw 60 fps request. Turn off if the preview freezes", s.forceFps) { s.forceFps = it }
                         OptionRow("Video bitrate", brNames[s.brIdx]) { s.brIdx = (s.brIdx + 1) % brNames.size }
@@ -1937,6 +1996,10 @@ fun CameraScreen() {
                             s.resetAll()
                             sdUri = null
                         }
+                        Spacer(Modifier.height(28.dp))
+                        Text("Camera 0.5", color = Color(0x88FFFFFF), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                        Text("Developer: Alienluap", color = Color(0xCCFFFFFF), fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+                        Text("© Alienluap. All rights reserved.", color = Color(0x88FFFFFF), fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
                         Spacer(Modifier.height(24.dp))
                     }
                 }
