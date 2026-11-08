@@ -72,6 +72,8 @@ val blurNames = listOf("Low", "Medium", "High")
 val blurDiv = listOf(6, 10, 16)
 val prioNames = listOf("Quality", "Balanced", "Speed")
 val engineNames = listOf("Auto (fast)", "TextureView (compatible)")
+val liveNames = listOf("1.5 s", "2 s", "3 s", "4 s")
+val liveMsVals = listOf(1500L, 2000L, 3000L, 4000L)
 val wmPosNames = listOf("Bottom left", "Bottom right", "Bottom center")
 val galleryNames = listOf("In-app viewer", "Google Photos (this item)", "Google Photos (app)")
 val wbNames = listOf("AUTO", "DAY", "CLOUD", "TUNG", "FLUO")
@@ -158,6 +160,11 @@ class AppSettings(private val p: SharedPreferences) {
     var wmOn by bool("wmon", false)
     var wmDate by bool("wmdate", true)
     var wmText by str("wmtext", "Shot on Note 8")
+    var vRatioIdx by int("vratio", 1)
+    var liveIdx by int("livelen", 1)
+    var ois by bool("ois", true)
+    var eis by bool("eis", false)
+    var wifiManual by bool("wifimanual", false)
 
     fun resetAll() {
         all.forEach { it.reset() }
@@ -207,12 +214,13 @@ fun makeQr(b: Barcode, raw: String): QrResult {
     return QrResult(raw, 0, "Copy: " + raw.replace("\n", " "), null, null, 0, false)
 }
 
-fun connectWifi(ctx: Context, ssid: String, pass: String?, type: Int, hidden: Boolean): String {
+fun connectWifi(ctx: Context, ssid: String, pass: String?, type: Int, hidden: Boolean, manual: Boolean = false): String {
     try {
-        if (type == 3) {
+        if (type == 3 || manual) {
             if (!pass.isNullOrEmpty()) copyText(ctx, pass)
             ctx.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            return "WEP can't be added by apps. Password copied; pick \"$ssid\" in Wi-Fi settings."
+            return if (type == 3) "WEP can't be added by apps. Password copied; pick \"$ssid\" in Wi-Fi settings."
+            else "Password copied. Pick \"$ssid\" in Wi-Fi settings and paste it."
         }
         val b = WifiNetworkSuggestion.Builder().setSsid(ssid)
         if (type != 1 && !pass.isNullOrEmpty()) b.setWpa2Passphrase(pass)
