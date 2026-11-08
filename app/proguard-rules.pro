@@ -1,0 +1,5 @@
+-ignorewarnings
+-keepattributes *Annotation*
+-dontwarn javax.annotation.**
+-dontwarn org.slf4j.**
+-dontwarn com.google.errorprone.annotations.**
