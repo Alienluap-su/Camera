@@ -1,5 +1,10 @@
 name: Build APK
-on: [push, workflow_dispatch]
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -12,8 +17,27 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
-      - run: gradle assembleDebug
+      - name: Signed release build
+        continue-on-error: true
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/ks.p12"
+            SHA=$(keytool -list -v -keystore "$RUNNER_TEMP/ks.p12" -storetype PKCS12 -storepass "$KS_PASS" -alias alienluap | grep 'SHA256:' | head -1 | sed 's/.*SHA256: *//' | tr -d ':' | tr 'A-F' 'a-f')
+            gradle assembleRelease -PksPath="$RUNNER_TEMP/ks.p12" -PksPass="$KS_PASS" -PcertSha="$SHA"
+          else
+            echo "No signing secrets found, skipping the release build"
+          fi
+      - name: Debug build (backup)
+        run: gradle assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: SamCam-debug
+          name: Camera-release
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Camera-debug
           path: app/build/outputs/apk/debug/*.apk
