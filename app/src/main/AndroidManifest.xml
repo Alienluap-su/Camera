@@ -11,9 +11,18 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <queries>
         <package android:name="com.google.android.apps.photos" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="image/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="video/*" />
+        </intent>
     </queries>
     <application android:label="Camera" android:icon="@drawable/ic_logo"
         android:allowBackup="false"
+        android:largeHeap="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true"
             android:screenOrientation="portrait"
