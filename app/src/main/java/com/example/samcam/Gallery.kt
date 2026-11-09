@@ -92,23 +92,56 @@ fun loadFull(ctx: Context, uri: Uri, video: Boolean): Bitmap? {
     return null
 }
 
-fun openInPhotos(ctx: Context, uri: Uri, video: Boolean) {
+class GalleryApp(val label: String, val pkg: String)
+
+fun listGalleryApps(ctx: Context): List<GalleryApp> {
+    val pm = ctx.packageManager
+    val out = LinkedHashMap<String, GalleryApp>()
+    for (mime in listOf("image/*", "video/*")) {
+        val i = Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse("content://media/external/images/media/1"), mime)
+        val list = try {
+            pm.queryIntentActivities(i, 0)
+        } catch (e: Exception) {
+            emptyList()
+        }
+        for (ri in list) {
+            val p = ri.activityInfo.packageName
+            if (p == ctx.packageName || out.containsKey(p)) continue
+            out[p] = GalleryApp(ri.loadLabel(pm).toString(), p)
+        }
+    }
+    return out.values.sortedBy { it.label.lowercase() }
+}
+
+fun openExternal(ctx: Context, uri: Uri, video: Boolean, pkg: String): Boolean {
     val mime = if (video) "video/*" else "image/*"
     val base = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    try {
-        ctx.startActivity(Intent(base).setPackage("com.google.android.apps.photos"))
-    } catch (e: Exception) {
-        try {
-            ctx.startActivity(base)
-        } catch (x: Exception) {
-            Toast.makeText(ctx, "No viewer app found", Toast.LENGTH_SHORT).show()
+    return try {
+        if (pkg == "ask" || pkg.isEmpty()) {
+            ctx.startActivity(Intent.createChooser(base, "Open with").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } else {
+            ctx.startActivity(Intent(base).setPackage(pkg))
         }
+        true
+    } catch (e: Exception) {
+        false
     }
 }
 
 @Composable
-fun GalleryViewer(start: Uri?, startVideo: Boolean, onClose: () -> Unit) {
+fun GalleryChoice(label: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 12.dp, horizontal = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
+        if (selected) Text("✓", color = YELLOW, fontSize = 16.sp)
+    }
+}
+
+@Composable
+fun GalleryViewer(start: Uri?, startVideo: Boolean, pkg: String, onClose: () -> Unit) {
     val ctx = LocalContext.current
     var items by remember { mutableStateOf<List<MediaItem>?>(null) }
     var startIdx by remember { mutableIntStateOf(-1) }
@@ -140,7 +173,7 @@ fun GalleryViewer(start: Uri?, startVideo: Boolean, onClose: () -> Unit) {
                     value = withContext(Dispatchers.IO) { loadFull(ctx, item.uri, item.video) }
                 }
                 Box(
-                    Modifier.fillMaxSize().clickable { if (item.video) openInPhotos(ctx, item.uri, true) },
+                    Modifier.fillMaxSize().clickable { if (item.video) openExternal(ctx, item.uri, true, pkg) },
                     contentAlignment = Alignment.Center
                 ) {
                     val b = bmp
@@ -170,8 +203,8 @@ fun GalleryViewer(start: Uri?, startVideo: Boolean, onClose: () -> Unit) {
                     i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     ctx.startActivity(Intent.createChooser(i, "Share"))
                 }.padding(12.dp))
-                Text("Photos", color = Color.White, fontSize = 16.sp,
-                    modifier = Modifier.clickable { openInPhotos(ctx, cur.uri, cur.video) }.padding(12.dp))
+                Text("Open with", color = Color.White, fontSize = 16.sp,
+                    modifier = Modifier.clickable { openExternal(ctx, cur.uri, cur.video, pkg) }.padding(12.dp))
                 Text("Delete", color = Color(0xFFFF6B6B), fontSize = 16.sp, modifier = Modifier.clickable {
                     try {
                         if (Build.VERSION.SDK_INT >= 30) {
