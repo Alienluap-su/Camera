@@ -138,6 +138,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Observer
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
@@ -156,6 +159,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -170,7 +174,7 @@ import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.roundToInt
 
-class Attempt(val still: Boolean, val video: Boolean, val analysis: Boolean)
+class Attempt(val still: Boolean, val video: Boolean, val analysis: Boolean, val fpsReq: Boolean = true)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -362,6 +366,12 @@ fun CameraScreen(onReady: () -> Unit) {
     var hdrDriver by remember { mutableStateOf(false) }
     var oisAvail by remember { mutableStateOf(false) }
     var eisAvail by remember { mutableStateOf(false) }
+    var fpsSup by remember { mutableStateOf(booleanArrayOf(true, true, false)) }
+    var aeLocked by remember { mutableStateOf(false) }
+    var focusUiOn by remember { mutableStateOf(false) }
+    var evTouch by remember { mutableIntStateOf(0) }
+    var showGalleryPicker by remember { mutableStateOf(false) }
+    var galleryApps by remember { mutableStateOf<List<GalleryApp>?>(null) }
     val zoomTarget = remember { mutableFloatStateOf(1f) }
     val zoomShown = remember { mutableFloatStateOf(1f) }
     val rulerBump = remember { mutableIntStateOf(0) }
@@ -517,7 +527,23 @@ fun CameraScreen(onReady: () -> Unit) {
     LaunchedEffect(focusTick) {
         if (focusTick > 0) {
             focusAnimV.snapTo(0f)
-            focusAnimV.animateTo(1f, tween(800))
+            focusAnimV.animateTo(1f, tween(260))
+        }
+    }
+
+    LaunchedEffect(focusTick, evTouch, aeLocked) {
+        if (focusTick > 0) {
+            focusUiOn = true
+            if (!aeLocked) {
+                delay(3500)
+                focusUiOn = false
+            }
+        }
+    }
+
+    LaunchedEffect(showGalleryPicker) {
+        if (showGalleryPicker && galleryApps == null) {
+            galleryApps = withContext(Dispatchers.IO) { listGalleryApps(ctx) }
         }
     }
 
@@ -723,6 +749,10 @@ fun CameraScreen(onReady: () -> Unit) {
             "v", "s" -> {
                 attempts.add(Attempt(true, true, false))
                 attempts.add(Attempt(false, true, false))
+                if (bindCat == "s" || fpsVals[s.fpsIdx] != 30) {
+                    attempts.add(Attempt(true, true, false, false))
+                    attempts.add(Attempt(false, true, false, false))
+                }
             }
             else -> attempts.add(Attempt(false, false, false))
         }
@@ -746,9 +776,9 @@ fun CameraScreen(onReady: () -> Unit) {
                     val vb = brVals[s.brIdx]
                     if (vb > 0 && bindCat == "v") rb.setTargetVideoEncodingBitRate(vb)
                     val vcb = VideoCapture.Builder(rb.build())
-                    if (bindCat == "s") {
+                    if (bindCat == "s" && at.fpsReq) {
                         vcb.setTargetFrameRate(Range(120, 240))
-                    } else if (bindCat == "v" && fpsVals[s.fpsIdx] != 30) {
+                    } else if (bindCat == "v" && at.fpsReq && fpsVals[s.fpsIdx] != 30) {
                         vcb.setTargetFrameRate(Range(fpsVals[s.fpsIdx], fpsVals[s.fpsIdx]))
                     }
                     val built = vcb.build()
@@ -832,10 +862,15 @@ fun CameraScreen(onReady: () -> Unit) {
         }
 
         camera = cam
+        aeLocked = false
+        focusUiOn = false
         liveReady = boundAt?.video == true && stillCat
         if (liveWanted && !liveReady) toast("Live photo isn't supported by this camera driver (it needs photo and video at once).")
         if ((bindCat == "v" || bindCat == "s") && boundAt?.still == false) {
             toast("Taking photos while recording isn't supported by this camera driver")
+        }
+        if ((bindCat == "v" || bindCat == "s") && boundAt?.fpsReq == false) {
+            toast(if (bindCat == "v") "That frame rate isn't available with these settings. Recording at the default rate." else "Real slow motion isn't available on this camera. The video is stretched instead.")
         }
         ev = 0
         delay(250)
@@ -870,11 +905,13 @@ fun CameraScreen(onReady: () -> Unit) {
             if (ps != null && fl != null && fl > 0f) {
                 panoFov = (2.0 * atan(minOf(ps.width, ps.height) / (2.0 * fl))).toFloat()
             }
-            if (bindCat == "v" && fpsVals[s.fpsIdx] > 30) {
-                val want = fpsVals[s.fpsIdx]
-                if (ranges == null || ranges.none { it.upper >= want }) {
-                    toast("${want}fps is not offered by this camera driver. Run the 60 fps test in Camera info.")
-                }
+            val has24 = ranges == null || ranges.any { it.lower <= 24 && it.upper >= 24 }
+            val has60 = ranges != null && ranges.any { it.upper >= 60 }
+            fpsSup = booleanArrayOf(has24, true, has60)
+            if (bindCat == "v" && !fpsSup[s.fpsIdx] && !(s.forceFps && s.fpsIdx == 2)) {
+                val wantF = fpsVals[s.fpsIdx]
+                s.fpsIdx = 1
+                toast("${wantF}fps isn't supported by this camera, so 30 fps is used.")
             }
         } catch (e: Exception) {
             isoRange = null
@@ -910,7 +947,10 @@ fun CameraScreen(onReady: () -> Unit) {
     }
     LaunchedEffect(ev, camera, mode) {
         try {
-            val idx = if (mode == Mode.NIGHT) ((evRange?.upper ?: 0) * 2 / 3) else ev
+            val base = if (mode == Mode.NIGHT) ((evRange?.upper ?: 0) * 2 / 3) else 0
+            val er2 = evRange
+            val raw = base + ev
+            val idx = if (er2 != null) raw.coerceIn(er2.lower, er2.upper) else raw
             camera?.cameraControl?.setExposureCompensationIndex(idx)
         } catch (e: Exception) {
         }
@@ -918,7 +958,7 @@ fun CameraScreen(onReady: () -> Unit) {
 
     LaunchedEffect(
         mode, camera, proWb, proManualExp, isoVal, shutNs, proManualFocus, proFocusF, minFocus,
-        s.forceFps, s.fpsIdx, nightFps, s.hdr, s.denoise, hdrDriver, s.ois, s.eis, oisAvail, eisAvail
+        s.forceFps, s.fpsIdx, nightFps, s.hdr, s.denoise, hdrDriver, s.ois, s.eis, oisAvail, eisAvail, s.hdrMode, aeLocked
     ) {
         val cam = camera ?: return@LaunchedEffect
         try {
@@ -956,7 +996,7 @@ fun CameraScreen(onReady: () -> Unit) {
                     any = true
                 }
             }
-            if (s.hdr && hdrDriver && mode in stillModes && mode != Mode.PRO) {
+            if (s.hdr && s.hdrMode == 1 && hdrDriver && mode in stillModes && mode != Mode.PRO) {
                 b.setCaptureRequestOption(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_USE_SCENE_MODE)
                 b.setCaptureRequestOption(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_HDR)
                 any = true
@@ -964,6 +1004,10 @@ fun CameraScreen(onReady: () -> Unit) {
             if (mode == Mode.VIDEO && s.forceFps && fpsVals[s.fpsIdx] > 30) {
                 val f = fpsVals[s.fpsIdx]
                 b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(f, f))
+                any = true
+            }
+            if (aeLocked) {
+                b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
                 any = true
             }
             if (s.ois && oisAvail) {
@@ -1046,15 +1090,20 @@ fun CameraScreen(onReady: () -> Unit) {
         })
     }
 
+    fun softHdrFlag(): Boolean {
+        val evOk = evRange?.let { it.upper > it.lower } == true
+        return s.hdr && (s.hdrMode == 2 || (s.hdrMode == 1 && !hdrDriver) || (s.hdrMode == 0 && (!evOk || mode != Mode.PHOTO)))
+    }
+
     suspend fun processShot(f: File, m: Mode): Uri? {
-        var bmp = decodeFile(f, if (m == Mode.ULTRA) 4200 else 3000) ?: return null
+        var bmp = decodeFile(f, if (m == Mode.ULTRA) 4200 else if (m == Mode.PORTRAIT) 2400 else 3000) ?: return null
         try {
             if (m == Mode.PORTRAIT) {
                 bmp = portraitBlur(bmp, segLazy.value, blurDiv[s.blurIdx])
             } else if (m == Mode.DOC) {
                 bmp = docScan(bmp, recLazy.value, s.docBw, s.docAuto)
             }
-            val softHdr = s.hdr && !hdrDriver
+            val softHdr = softHdrFlag()
             if (m != Mode.DOC && m != Mode.PRO && (softHdr || s.ai)) bmp = toneMap(bmp, softHdr, s.ai)
             if (s.wmOn) bmp = drawWatermark(bmp, s.wmText, s.wmDate, s.wmPos)
         } catch (e: Throwable) {
@@ -1145,6 +1194,80 @@ fun CameraScreen(onReady: () -> Unit) {
         }
     }
 
+    suspend fun processHdr(files: List<File>): Uri? {
+        var bmp: Bitmap? = null
+        try {
+            val list = ArrayList<Bitmap>()
+            for (f in files) {
+                val b = decodeFile(f, 2600)
+                if (b != null) list.add(b)
+            }
+            bmp = if (list.size >= 2) fuseExposures(list) else list.firstOrNull()
+        } catch (e: Throwable) {
+            bmp = null
+        }
+        if (bmp == null) bmp = decodeFile(files[0], 3000)
+        var out = bmp ?: return null
+        try {
+            if (s.ai) out = toneMap(out, false, true)
+            if (s.wmOn) out = drawWatermark(out, s.wmText, s.wmDate, s.wmPos)
+        } catch (e: Throwable) {
+        }
+        return saveBitmap(ctx, out, sdUri, "HDR_")
+    }
+
+    fun takeHdr() {
+        val cam = camera
+        if (cam == null || imageCapture == null) {
+            takePlain()
+            return
+        }
+        if (processing) {
+            toast("Still saving the last photo")
+            return
+        }
+        scope.launch {
+            processing = true
+            holdStill = true
+            val id = stampNow()
+            val step = try {
+                cam.cameraInfo.exposureState.exposureCompensationStep.toFloat()
+            } catch (e: Exception) {
+                0.33f
+            }
+            val rng = cam.cameraInfo.exposureState.exposureCompensationRange
+            val d = maxOf(1, (1.7f / maxOf(step, 0.05f)).roundToInt())
+            val order = listOf(ev, (ev - d).coerceIn(rng.lower, rng.upper), (ev + d).coerceIn(rng.lower, rng.upper))
+            val files = ArrayList<File>()
+            for ((k, idx) in order.withIndex()) {
+                try {
+                    withTimeoutOrNull(1500L) {
+                        suspendCancellableCoroutine<Unit> { c ->
+                            val f = cam.cameraControl.setExposureCompensationIndex(idx)
+                            f.addListener({ if (c.isActive) c.resume(Unit) }, exec)
+                        }
+                    }
+                } catch (e: Exception) {
+                }
+                delay(if (k == 0) 150L else 350L)
+                val tmp = File(ctx.cacheDir, "hdr_${id}_$k.jpg")
+                val jd = CompletableDeferred<Boolean>()
+                shoot(tmp) { jd.complete(it) }
+                val ok = withTimeoutOrNull(8000L) { jd.await() } == true
+                if (ok) files.add(tmp) else tmp.delete()
+            }
+            try {
+                cam.cameraControl.setExposureCompensationIndex(ev)
+            } catch (e: Exception) {
+            }
+            holdStill = false
+            val uri = if (files.isEmpty()) null else withContext(Dispatchers.Default) { processHdr(files) }
+            files.forEach { it.delete() }
+            processing = false
+            if (uri != null) setLast(uri, "image/jpeg") else toast("Could not save the HDR photo")
+        }
+    }
+
     fun takePhoto() {
         if (imageCapture == null) return
         snd(MediaActionSound.SHUTTER_CLICK)
@@ -1157,9 +1280,11 @@ fun CameraScreen(onReady: () -> Unit) {
         }
         val m = mode
         val live = s.live && m == Mode.PHOTO && liveReady
-        val softHdr = s.hdr && !hdrDriver
+        val softHdr = softHdrFlag()
+        val evOk = evRange?.let { it.upper > it.lower } == true
+        val hdrMulti = !live && s.hdr && s.hdrMode == 0 && m == Mode.PHOTO && evOk
         val post = !live && (m == Mode.PORTRAIT || m == Mode.DOC || (m != Mode.PRO && (softHdr || s.ai)) || s.wmOn)
-        if (live) takeLive() else if (post) takePost(m) else takePlain()
+        if (live) takeLive() else if (hdrMulti) takeHdr() else if (post) takePost(m) else takePlain()
     }
 
     fun togglePause() {
@@ -1233,6 +1358,14 @@ fun CameraScreen(onReady: () -> Unit) {
                 if (evt.hasError()) toast("Video error ${evt.error}") else setLast(out.uri, "video/mp4")
             }
         }
+    }
+
+    fun nextFps() {
+        val allowed = ArrayList<Int>()
+        for (i in fpsVals.indices) if (fpsSup[i] || (s.forceFps && i == 2)) allowed.add(i)
+        if (allowed.isEmpty()) allowed.add(1)
+        val cur = allowed.indexOf(s.fpsIdx)
+        s.fpsIdx = allowed[(cur + 1) % allowed.size]
     }
 
     fun stopTimelapse() {
@@ -1481,18 +1614,22 @@ fun CameraScreen(onReady: () -> Unit) {
     }
 
     fun openGallery() {
+        val pkg = s.galleryPkg
         val u = lastUri
-        when (s.galleryMode) {
-            0 -> showGallery = true
-            1 -> if (u != null) openInPhotos(ctx, u, lastMime.startsWith("video")) else showGallery = true
-            else -> {
-                try {
-                    val li = ctx.packageManager.getLaunchIntentForPackage("com.google.android.apps.photos")
-                    if (li != null) ctx.startActivity(li) else showGallery = true
-                } catch (e: Exception) {
-                    showGallery = true
-                }
-            }
+        if (pkg.isEmpty() || u == null) {
+            showGallery = true
+            return
+        }
+        if (!openExternal(ctx, u, lastMime.startsWith("video"), pkg)) showGallery = true
+    }
+
+    fun galleryLabel(pkg: String): String = when {
+        pkg.isEmpty() -> "In-app viewer"
+        pkg == "ask" -> "Ask every time"
+        else -> try {
+            ctx.packageManager.getApplicationLabel(ctx.packageManager.getApplicationInfo(pkg, 0)).toString()
+        } catch (e: Exception) {
+            pkg
         }
     }
 
@@ -1530,11 +1667,36 @@ fun CameraScreen(onReady: () -> Unit) {
 
     LaunchedEffect(Bus.tick) { if (Bus.tick > 0) shutter() }
 
+    DisposableEffect(owner) {
+        val lo = object : LifecycleEventObserver {
+            override fun onStateChanged(source: LifecycleOwner, event: Lifecycle.Event) {
+                if (event == Lifecycle.Event.ON_STOP) {
+                    try {
+                        recording?.stop()
+                    } catch (x: Exception) {
+                    }
+                    recording = null
+                    paused = false
+                    if (tlOn) {
+                        tlOn = false
+                        tlJob?.cancel()
+                    }
+                    panoOn = false
+                    torch = false
+                    aeLocked = false
+                }
+            }
+        }
+        owner.lifecycle.addObserver(lo)
+        onDispose { owner.lifecycle.removeObserver(lo) }
+    }
+
     BackHandler(enabled = showSettings && !showGallery) {
         if (showInfo) showInfo = false else showSettings = false
     }
 
     val pillText: String? = when {
+        aeLocked -> null
         mode == Mode.DOC -> if (docFound) "Document detected" else "Align the page inside the frame"
         s.scenePill && mode in stillModes && scene != null -> scene
         else -> null
@@ -1549,13 +1711,28 @@ fun CameraScreen(onReady: () -> Unit) {
             Modifier.align(Alignment.TopCenter).padding(top = if (isFull) 0.dp else 56.dp).fillMaxWidth()
                 .aspectRatio(arAnim)
                 .pointerInput(s.tapFocus) {
-                    detectTapGestures { o ->
+                    detectTapGestures(
+                        onLongPress = { o ->
+                            if (mode != Mode.PANO && s.tapFocus) {
+                                val p = previewView.meteringPointFactory.createPoint(o.x, o.y)
+                                camera?.cameraControl?.startFocusAndMetering(
+                                    FocusMeteringAction.Builder(p, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                                        .disableAutoCancel().build()
+                                )
+                                focusPos = o
+                                focusTick = focusTick + 1
+                                aeLocked = true
+                                buzz()
+                            }
+                        }
+                    ) { o ->
                         if (mode == Mode.PANO) {
                             if (!panoOn) {
                                 panoRight = !panoRight
                                 buzz()
                             }
                         } else if (s.tapFocus) {
+                            if (aeLocked) aeLocked = false
                             val p = previewView.meteringPointFactory.createPoint(o.x, o.y)
                             camera?.cameraControl?.startFocusAndMetering(FocusMeteringAction.Builder(p).build())
                             focusPos = o
@@ -1598,13 +1775,35 @@ fun CameraScreen(onReady: () -> Unit) {
                 }
             }
             if (mode == Mode.PANO) PanoGuide(panoOn, panoRight, panoThumb, { panoDrift }, panoMsg)
+            val ringA by animateFloatAsState(targetValue = if (focusUiOn) 1f else 0f, animationSpec = tween(250), label = "ring")
             Canvas(Modifier.fillMaxSize()) {
                 val fv = focusAnimV.value
                 val fp = focusPos
-                if (fp != null && fv < 1f) {
-                    val a = if (fv < 0.7f) 1f else 1f - (fv - 0.7f) / 0.3f
-                    val rr = 80f - 36f * minOf(1f, fv * 3f)
-                    drawCircle(YELLOW.copy(alpha = a), radius = rr, center = fp, style = Stroke(4f))
+                if (fp != null && ringA > 0.01f) {
+                    val rr = 76f - 36f * fv
+                    drawCircle(YELLOW.copy(alpha = ringA), radius = rr, center = fp, style = Stroke(4f))
+                }
+            }
+            val fpv = focusPos
+            val erng = evRange
+            if (fpv != null && focusUiOn && erng != null && erng.upper > erng.lower && mode != Mode.PANO) {
+                ExposureHandle(
+                    cx = fpv.x, cy = fpv.y, areaW = screenW.toFloat(),
+                    ev = ev, evMin = erng.lower, evMax = erng.upper,
+                    onEv = { ev = it },
+                    onTouch = { evTouch = evTouch + 1 }
+                )
+            }
+            if (aeLocked) {
+                Box(Modifier.align(Alignment.TopCenter).padding(top = 14.dp)) {
+                    LockPill {
+                        aeLocked = false
+                        try {
+                            camera?.cameraControl?.cancelFocusAndMetering()
+                        } catch (e: Exception) {
+                        }
+                        focusTick = focusTick + 1
+                    }
                 }
             }
             if (countdown > 0) {
@@ -1703,7 +1902,7 @@ fun CameraScreen(onReady: () -> Unit) {
                         Mode.VIDEO -> {
                             IconBox({ torch = !torch }, torch) { FlashIcon(if (torch) 2 else 0) }
                             IconBox({ s.vqIdx = (s.vqIdx + 1) % vqNames.size }, false) { TextIcon(vqNames[s.vqIdx], false) }
-                            IconBox({ s.fpsIdx = (s.fpsIdx + 1) % fpsVals.size }, s.forceFps && fpsVals[s.fpsIdx] > 30) {
+                            IconBox({ nextFps() }, s.forceFps && fpsVals[s.fpsIdx] > 30) {
                                 TextIcon("${fpsVals[s.fpsIdx]}fps", s.forceFps && fpsVals[s.fpsIdx] > 30)
                             }
                             IconBox({ s.vRatioIdx = (s.vRatioIdx + 1) % ratios.size }, false) { TextIcon(ratios[s.vRatioIdx].label, false) }
@@ -1896,7 +2095,7 @@ fun CameraScreen(onReady: () -> Unit) {
                                     delay(600)
                                     val b = probeOnce(ctx, id, 60)
                                     val verdict = if (b.fps >= 50.0) {
-                                        "RESULT: the driver DOES deliver about 60 fps in raw Camera2. Tell me and I will build a direct 60 fps recorder."
+                                        "RESULT: the camera delivers about 60 fps in raw Camera2. Turn on \"Allow 60 fps even if not reported\" in Settings to try it in videos."
                                     } else if (b.fps > 0.0) {
                                         "RESULT: the driver stays near ${b.fps.toInt()} fps even in raw Camera2. This is a ROM / camera HAL limit that an app cannot change."
                                     } else {
@@ -1924,7 +2123,8 @@ fun CameraScreen(onReady: () -> Unit) {
                         OptionRow("Photo quality (JPEG)", jpegNames[s.jpegIdx]) { s.jpegIdx = (s.jpegIdx + 1) % jpegNames.size }
                         SwitchRow("Live photo", "Photo mode: saves a short motion clip with the photo (Motion Photo)", s.live) { s.live = it }
                         OptionRow("Live photo length", liveNames[s.liveIdx]) { s.liveIdx = (s.liveIdx + 1) % liveNames.size }
-                        SwitchRow("HDR", if (hdrDriver) "Uses the camera driver's HDR scene mode" else "Software tone-mapping (driver has no HDR mode)", s.hdr) { s.hdr = it }
+                        SwitchRow("HDR", "Photo mode: takes 3 photos at different brightness and merges them. Hold still.", s.hdr) { s.hdr = it }
+                        OptionRow("HDR method", hdrModeNames[s.hdrMode]) { s.hdrMode = (s.hdrMode + 1) % hdrModeNames.size }
                         SwitchRow("AI enhancement", "Boosts colour and contrast after capture", s.ai) { s.ai = it }
                         SwitchRow("Denoiser", "Asks the driver for high-quality noise reduction and sharpening", s.denoise) { s.denoise = it }
                         SwitchRow("Scene recognition pill", "Shows what the camera is looking at", s.scenePill) { s.scenePill = it }
@@ -1946,11 +2146,11 @@ fun CameraScreen(onReady: () -> Unit) {
 
                         SectionTitle("Videos")
                         OptionRow("Video resolution", vqNames[s.vqIdx]) { s.vqIdx = (s.vqIdx + 1) % vqNames.size }
-                        OptionRow("Video aspect ratio", ratios[s.vRatioIdx].label) { s.vRatioIdx = (s.vRatioIdx + 1) % ratios.size }
+                        OptionRow ("Video aspect ratio", ratios[s.vRatioIdx].label) { s.vRatioIdx = (s.vRatioIdx + 1) % ratios.size }
                         SwitchRow("Optical stabilization (OIS)", if (oisAvail) "Uses the lens stabilizer" else "Not offered by this camera driver", s.ois) { s.ois = it }
                         SwitchRow("Video stabilization (EIS)", if (eisAvail) "Digital stabilization for videos (crops the frame slightly)" else "Not offered by this camera driver", s.eis) { s.eis = it }
-                        OptionRow("Video frame rate", "${fpsVals[s.fpsIdx]} fps") { s.fpsIdx = (s.fpsIdx + 1) % fpsVals.size }
-                        SwitchRow("Force 60 fps (experimental)", "Send a raw 60 fps request. Turn off if the preview freezes", s.forceFps) { s.forceFps = it }
+                        OptionRow("Video frame rate", "${fpsVals[s.fpsIdx]} fps" + if (fpsSup[2]) "  (60 supported)" else "") { nextFps() }
+                        SwitchRow("Allow 60 fps even if not reported (experimental)", "Lets you pick 60 fps if the driver hides it. Turn off if videos freeze", s.forceFps) { s.forceFps = it }
                         OptionRow("Video bitrate", brNames[s.brIdx]) { s.brIdx = (s.brIdx + 1) % brNames.size }
                         SwitchRow("Record audio", "Use the microphone when recording videos", s.mic) { s.mic = it }
                         OptionRow("Slow motion speed", slowNames[s.slowIdx] + " slower") { s.slowIdx = (s.slowIdx + 1) % slowVals.size }
@@ -1977,7 +2177,28 @@ fun CameraScreen(onReady: () -> Unit) {
                                 sdUri = null
                             }
                         }
-                        OptionRow("Gallery button opens", galleryNames[s.galleryMode]) { s.galleryMode = (s.galleryMode + 1) % galleryNames.size }
+                        OptionRow("Open pictures with", galleryLabel(s.galleryPkg)) { showGalleryPicker = !showGalleryPicker }
+                        if (showGalleryPicker) {
+                            val apps = galleryApps
+                            if (apps == null) {
+                                Text("Looking for gallery apps…", color = Color(0x99FFFFFF), fontSize = 13.sp, modifier = Modifier.padding(8.dp))
+                            } else {
+                                GalleryChoice("In-app viewer (swipe, share, delete)", s.galleryPkg.isEmpty()) {
+                                    s.galleryPkg = ""
+                                    showGalleryPicker = false
+                                }
+                                GalleryChoice("Ask every time", s.galleryPkg == "ask") {
+                                    s.galleryPkg = "ask"
+                                    showGalleryPicker = false
+                                }
+                                for (a in apps) {
+                                    GalleryChoice(a.label, s.galleryPkg == a.pkg) {
+                                        s.galleryPkg = a.pkg
+                                        showGalleryPicker = false
+                                    }
+                                }
+                            }
+                        }
 
                         SectionTitle("Camera engine")
                         OptionRow("Preview engine", engineNames[s.engine]) { s.engine = (s.engine + 1) % engineNames.size }
@@ -1997,7 +2218,7 @@ fun CameraScreen(onReady: () -> Unit) {
                             sdUri = null
                         }
                         Spacer(Modifier.height(28.dp))
-                        Text("Camera 0.5", color = Color(0x88FFFFFF), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                        Text("Camera 0.6", color = Color(0x88FFFFFF), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
                         Text("Developer: Alienluap", color = Color(0xCCFFFFFF), fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
                         Text("© Alienluap. All rights reserved.", color = Color(0x88FFFFFF), fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
                         Spacer(Modifier.height(24.dp))
@@ -2007,7 +2228,7 @@ fun CameraScreen(onReady: () -> Unit) {
         }
 
         AnimatedVisibility(visible = showGallery, enter = fadeIn(), exit = fadeOut()) {
-            GalleryViewer(lastUri, lastMime.startsWith("video")) { showGallery = false }
+            GalleryViewer(lastUri, lastMime.startsWith("video"), s.galleryPkg) { showGallery = false }
         }
     }
 }
