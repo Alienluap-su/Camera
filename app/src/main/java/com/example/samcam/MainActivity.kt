@@ -20,6 +20,8 @@ import android.media.MediaActionSound
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.os.StatFs
 import android.provider.MediaStore
 import android.util.Range
 import android.util.Rational
@@ -39,6 +41,7 @@ import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.DynamicRange
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -164,6 +167,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.OutputStream
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
@@ -174,7 +178,7 @@ import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.roundToInt
 
-class Attempt(val still: Boolean, val video: Boolean, val analysis: Boolean, val fpsReq: Boolean = true)
+class Attempt(val still: Boolean, val video: Boolean, val analysis: Boolean, val fpsReq: Boolean = true, val q: Quality? = null)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -228,7 +232,7 @@ fun Root() {
             CameraScreen {
                 rootScope.launch {
                     val el = System.currentTimeMillis() - t0
-                    if (el < 500) delay(500 - el)
+                    if (el < 250) delay(250 - el)
                     splash = false
                 }
             }
@@ -274,7 +278,7 @@ fun CameraScreen(onReady: () -> Unit) {
             emptyList<String>()
         }
     }
-    val rearId = remember {
+    val rearLazy = remember { lazy {
         var found: String? = null
         try {
             val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -287,10 +291,9 @@ fun CameraScreen(onReady: () -> Unit) {
         } catch (e: Exception) {
         }
         found
-    }
-    val teleState = remember { mutableStateOf<TeleInfo?>(null) }
-    val tele = teleState.value
-    LaunchedEffect(Unit) { teleState.value = withContext(Dispatchers.IO) { detectTele(ctx) } }
+    } }
+    val lensState = remember { mutableStateOf<Lenses?>(null) }
+    val lens = lensState.value
     val modeOrder = remember { Mode.values().toList() }
     val itemW = 104.dp
     val itemPx = with(androidx.compose.ui.platform.LocalDensity.current) { itemW.toPx() }
@@ -362,7 +365,13 @@ fun CameraScreen(onReady: () -> Unit) {
     var videoCapture by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
     var liveReady by remember { mutableStateOf(false) }
     var useTele by remember { mutableStateOf(false) }
-    var teleBroken by remember { mutableStateOf(false) }
+    var teleBroken by remember { mutableStateOf(s.teleBad) }
+    var useUltra by remember { mutableStateOf(false) }
+    var ultraBroken by remember { mutableStateOf(s.ultraBad) }
+    var lensDone by remember { mutableStateOf(false) }
+    var burstOn by remember { mutableStateOf(false) }
+    var burstCount by remember { mutableIntStateOf(0) }
+    var vqSup by remember { mutableStateOf(booleanArrayOf(true, true, true, true, true)) }
     var hdrDriver by remember { mutableStateOf(false) }
     var oisAvail by remember { mutableStateOf(false) }
     var eisAvail by remember { mutableStateOf(false) }
@@ -413,7 +422,7 @@ fun CameraScreen(onReady: () -> Unit) {
     var minFocus by remember { mutableFloatStateOf(0f) }
 
     val isRec = recording != null
-    val capturing = isRec || tlOn || panoOn
+    val capturing = isRec || tlOn || panoOn || burstOn
     val capturingNow = rememberUpdatedState(capturing)
     val bindCat = when (mode) {
         Mode.VIDEO -> "v"
@@ -493,6 +502,14 @@ fun CameraScreen(onReady: () -> Unit) {
     )
 
     SideEffect { Bus.volMode = s.volMode }
+
+    LaunchedEffect(streaming) {
+        if (streaming && !lensDone) {
+            lensDone = true
+            delay(500)
+            lensState.value = withContext(Dispatchers.IO) { detectLenses(ctx) }
+        }
+    }
 
     LaunchedEffect(mode) { s.lastMode = modeOrder.indexOf(mode) }
 
@@ -605,16 +622,23 @@ fun CameraScreen(onReady: () -> Unit) {
         }
     }
 
-    LaunchedEffect(tele, s.tele, front, camChoice, teleBroken) {
-        val t = tele ?: return@LaunchedEffect
-        if (!s.tele || front || camChoice > 0 || teleBroken) {
+    LaunchedEffect(lens, s.tele, front, camChoice, teleBroken, ultraBroken) {
+        val l = lens ?: return@LaunchedEffect
+        if (!s.tele || front || camChoice > 0) {
             if (useTele) useTele = false
+            if (useUltra) useUltra = false
             return@LaunchedEffect
         }
         snapshotFlow { zoomTarget.floatValue }.collect { z ->
             if (!capturingNow.value) {
-                if (!useTele && z >= t.factor) useTele = true
-                else if (useTele && z < t.factor * 0.94f) useTele = false
+                if (l.teleId != null && !teleBroken) {
+                    if (!useTele && !useUltra && z >= l.teleFactor) useTele = true
+                    else if (useTele && z < l.teleFactor * 0.94f) useTele = false
+                }
+                if (l.ultraId != null && !ultraBroken && camMin >= 0.95f) {
+                    if (!useUltra && !useTele && z < 0.97f) useUltra = true
+                    else if (useUltra && z >= 1.03f) useUltra = false
+                }
             }
         }
     }
@@ -680,7 +704,7 @@ fun CameraScreen(onReady: () -> Unit) {
     }
 
     LaunchedEffect(
-        bindCat, front, camChoice, useTele, ratioKey, capSize, maxQ, liveWanted, analysisWanted,
+        bindCat, front, camChoice, useTele, useUltra, ratioKey, capSize, maxQ, liveWanted, analysisWanted,
         s.vqIdx, s.fpsIdx, s.brIdx, camPaused, s.engine, screenW
     ) {
         if (screenW == 0) return@LaunchedEffect
@@ -725,7 +749,7 @@ fun CameraScreen(onReady: () -> Unit) {
 
         val wantId: String? = when {
             camChoice > 0 && camChoice <= camIds.size -> camIds[camChoice - 1]
-            !front && tele != null && s.tele && !teleBroken -> if (useTele) tele.teleId else tele.wideId
+            !front && lens != null && s.tele -> if (useTele && lens.teleId != null) lens.teleId else if (useUltra && lens.ultraId != null) lens.ultraId else lens.mainId
             else -> null
         }
         val selector: CameraSelector = if (wantId != null) {
@@ -749,6 +773,10 @@ fun CameraScreen(onReady: () -> Unit) {
             "v", "s" -> {
                 attempts.add(Attempt(true, true, false))
                 attempts.add(Attempt(false, true, false))
+                if (bindCat == "v" && fpsVals[s.fpsIdx] != 30 && s.vqIdx <= 1) {
+                    attempts.add(Attempt(true, true, false, true, Quality.FHD))
+                    attempts.add(Attempt(false, true, false, true, Quality.FHD))
+                }
                 if (bindCat == "s" || fpsVals[s.fpsIdx] != 30) {
                     attempts.add(Attempt(true, true, false, false))
                     attempts.add(Attempt(false, true, false, false))
@@ -771,8 +799,8 @@ fun CameraScreen(onReady: () -> Unit) {
                 var ic: ImageCapture? = null
                 var vc: VideoCapture<Recorder>? = null
                 if (at.video) {
-                    val q = if (bindCat == "v") vqVals[s.vqIdx] else Quality.HD
-                    val rb = Recorder.Builder().setQualitySelector(QualitySelector.from(q, FallbackStrategy.lowerQualityOrHigherThan(q)))
+                    val q = at.q ?: (if (bindCat == "v") vqVals[s.vqIdx] else Quality.HD)
+                    val rb = Recorder.Builder().setQualitySelector((if (q == Quality.HIGHEST) QualitySelector.from(Quality.HIGHEST) else QualitySelector.from(q, FallbackStrategy.lowerQualityOrHigherThan(q))))
                     val vb = brVals[s.brIdx]
                     if (vb > 0 && bindCat == "v") rb.setTargetVideoEncodingBitRate(vb)
                     val vcb = VideoCapture.Builder(rb.build())
@@ -837,8 +865,16 @@ fun CameraScreen(onReady: () -> Unit) {
         if (cam == null) {
             if (useTele) {
                 teleBroken = true
+                s.teleBad = true
                 useTele = false
                 toast("The telephoto lens isn't available to apps on this ROM. Using digital zoom.")
+                return@LaunchedEffect
+            }
+            if (useUltra) {
+                ultraBroken = true
+                s.ultraBad = true
+                useUltra = false
+                toast("The ultra-wide lens isn't available to apps on this ROM.")
                 return@LaunchedEffect
             }
             if (camChoice > 0) {
@@ -869,6 +905,9 @@ fun CameraScreen(onReady: () -> Unit) {
         if ((bindCat == "v" || bindCat == "s") && boundAt?.still == false) {
             toast("Taking photos while recording isn't supported by this camera driver")
         }
+        if (bindCat == "v" && boundAt?.q != null) {
+            toast("That frame rate works at 1080p, so the resolution was lowered.")
+        }
         if ((bindCat == "v" || bindCat == "s") && boundAt?.fpsReq == false) {
             toast(if (bindCat == "v") "That frame rate isn't available with these settings. Recording at the default rate." else "Real slow motion isn't available on this camera. The video is stretched instead.")
         }
@@ -877,7 +916,7 @@ fun CameraScreen(onReady: () -> Unit) {
         val zst = cam.cameraInfo.zoomState.value
         camMin = zst?.minZoomRatio ?: 1f
         camMax = zst?.maxZoomRatio ?: 1f
-        camBase = if (useTele && tele != null) tele.factor else 1f
+        camBase = if (useTele && lens != null) lens.teleFactor else if (useUltra && lens != null) lens.ultraFactor else 1f
         if (front != lastFront || camChoice != lastCamChoice) {
             lastFront = front
             lastCamChoice = camChoice
@@ -906,7 +945,21 @@ fun CameraScreen(onReady: () -> Unit) {
                 panoFov = (2.0 * atan(minOf(ps.width, ps.height) / (2.0 * fl))).toFloat()
             }
             val has24 = ranges == null || ranges.any { it.lower <= 24 && it.upper >= 24 }
-            val has60 = ranges != null && ranges.any { it.upper >= 60 }
+            val cx60 = try {
+                cam.cameraInfo.supportedFrameRateRanges.any { it.upper >= 60 }
+            } catch (e: Exception) {
+                false
+            }
+            val has60 = (ranges != null && ranges.any { it.upper >= 60 }) || cx60
+            if (bindCat == "v") {
+                val sq = try {
+                    Recorder.getVideoCapabilities(cam.cameraInfo).getSupportedQualities(DynamicRange.SDR)
+                } catch (e: Exception) {
+                    emptyList<Quality>()
+                }
+                vqSup = booleanArrayOf(true, sq.contains(Quality.UHD), sq.contains(Quality.FHD), sq.contains(Quality.HD), sq.contains(Quality.SD))
+                if (!vqSup[s.vqIdx]) s.vqIdx = 0
+            }
             fpsSup = booleanArrayOf(has24, true, has60)
             if (bindCat == "v" && !fpsSup[s.fpsIdx] && !(s.forceFps && s.fpsIdx == 2)) {
                 val wantF = fpsVals[s.fpsIdx]
@@ -921,10 +974,18 @@ fun CameraScreen(onReady: () -> Unit) {
         }
     }
 
-    LaunchedEffect(tele, s.tele, teleBroken, front, camChoice, camMin, camMax, camBase) {
-        minZoom = camMin * camBase
-        maxZoom = if (tele != null && s.tele && !teleBroken && !front && camChoice == 0) 10f else minOf(camMax * camBase, 10f)
-        zoomTarget.floatValue = zoomTarget.floatValue.coerceIn(minZoom, maxOf(minZoom, maxZoom))
+    LaunchedEffect(lens, s.tele, teleBroken, ultraBroken, front, camChoice, camMin, camMax, camBase, useTele, useUltra) {
+        val l = lens
+        var mn = camMin * camBase
+        var mx = minOf(camMax * camBase, 10f)
+        if (l != null && s.tele && !front && camChoice == 0) {
+            if (l.ultraId != null && !ultraBroken && camMin >= 0.95f) mn = minOf(mn, l.ultraFactor)
+            if (useTele) mn = minOf(mn, 1f)
+            if ((l.teleId != null && !teleBroken) || (l.ultraId != null && !ultraBroken)) mx = 10f
+        }
+        minZoom = mn
+        maxZoom = mx
+        zoomTarget.floatValue = zoomTarget.floatValue.coerceIn(mn, maxOf(mn, mx))
     }
 
     LaunchedEffect(flash, camera, imageCapture, mode) {
@@ -941,9 +1002,10 @@ fun CameraScreen(onReady: () -> Unit) {
             }
         }
     }
-    LaunchedEffect(torch, camera, mode) {
+    LaunchedEffect(torch, flash, camera, mode) {
         val torchOk = mode == Mode.VIDEO || mode == Mode.SLOMO || mode == Mode.TIMELAPSE
-        camera?.cameraControl?.enableTorch(torch && torchOk)
+        val on = if (mode in stillModes) flash == 3 else (torch && torchOk)
+        camera?.cameraControl?.enableTorch(on)
     }
     LaunchedEffect(ev, camera, mode) {
         try {
@@ -958,7 +1020,7 @@ fun CameraScreen(onReady: () -> Unit) {
 
     LaunchedEffect(
         mode, camera, proWb, proManualExp, isoVal, shutNs, proManualFocus, proFocusF, minFocus,
-        s.forceFps, s.fpsIdx, nightFps, s.hdr, s.denoise, hdrDriver, s.ois, s.eis, oisAvail, eisAvail, s.hdrMode, aeLocked
+        s.forceFps, s.fpsIdx, nightFps, s.hdr, s.denoise, hdrDriver, s.ois, s.eis, oisAvail, eisAvail, s.hdrMode, aeLocked, s.autoFocus
     ) {
         val cam = camera ?: return@LaunchedEffect
         try {
@@ -1006,6 +1068,13 @@ fun CameraScreen(onReady: () -> Unit) {
                 b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(f, f))
                 any = true
             }
+            if (!s.autoFocus && !(mode == Mode.PRO && proManualFocus)) {
+                val afm = info.getCameraCharacteristic(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)
+                if (afm != null && afm.contains(CaptureRequest.CONTROL_AF_MODE_AUTO)) {
+                    b.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+                    any = true
+                }
+            }
             if (aeLocked) {
                 b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
                 any = true
@@ -1052,8 +1121,11 @@ fun CameraScreen(onReady: () -> Unit) {
         })
     }
 
-    fun takePlain() {
-        val ic = imageCapture ?: return
+    fun takePlain(done: ((Boolean) -> Unit)? = null) {
+        val ic = imageCapture ?: run {
+            done?.invoke(false)
+            return
+        }
         val meta = ImageCapture.Metadata()
         meta.isReversedHorizontal = front && s.mirror
         val tree = sdUri
@@ -1078,6 +1150,7 @@ fun CameraScreen(onReady: () -> Unit) {
                 } catch (e: Exception) {
                 }
                 setLast(r.savedUri ?: doc, "image/jpeg")
+                done?.invoke(true)
             }
 
             override fun onError(e: ImageCaptureException) {
@@ -1086,6 +1159,7 @@ fun CameraScreen(onReady: () -> Unit) {
                 } catch (x: Exception) {
                 }
                 toast("Error: ${e.message}")
+                done?.invoke(false)
             }
         })
     }
@@ -1288,14 +1362,19 @@ fun CameraScreen(onReady: () -> Unit) {
     }
 
     fun togglePause() {
-        val r = recording ?: return
-        if (paused) {
-            r.resume()
-            paused = false
-        } else {
-            r.pause()
-            paused = true
+        val r = recording
+        if (r != null) {
+            if (paused) {
+                r.resume()
+                paused = false
+            } else {
+                r.pause()
+                paused = true
+            }
+        } else if (tlOn) {
+            paused = !paused
         }
+        buzz()
     }
 
     fun toggleRecord() {
@@ -1360,6 +1439,57 @@ fun CameraScreen(onReady: () -> Unit) {
         }
     }
 
+    fun startBurst() {
+        if (!s.burst || mode != Mode.PHOTO || imageCapture == null || burstOn || capturing || processing || countdown > 0) return
+        burstOn = true
+        burstCount = 0
+        buzz()
+        scope.launch {
+            try {
+                while (burstOn && burstCount < 30) {
+                    snd(MediaActionSound.SHUTTER_CLICK)
+                    val d = CompletableDeferred<Boolean>()
+                    takePlain { d.complete(it) }
+                    val ok = withTimeoutOrNull(6000L) { d.await() } == true
+                    if (!ok) break
+                    burstCount = burstCount + 1
+                }
+            } finally {
+                burstOn = false
+            }
+            toast(if (burstCount >= 30) "Burst limit reached: 30 photos" else "Burst: $burstCount photos")
+        }
+    }
+
+    fun stopBurst() {
+        burstOn = false
+    }
+
+    fun availText(): String {
+        return try {
+            val free = StatFs(Environment.getExternalStorageDirectory().path).availableBytes
+            var bps = if (s.brIdx > 0) brVals[s.brIdx] / 8L else when {
+                mode == Mode.SLOMO -> 1_300_000L
+                s.vqIdx <= 1 -> 6_000_000L
+                s.vqIdx == 2 -> 2_200_000L
+                s.vqIdx == 3 -> 1_300_000L
+                else -> 500_000L
+            }
+            if (mode == Mode.VIDEO && fpsVals[s.fpsIdx] == 60 && s.brIdx == 0) bps = bps * 16 / 10
+            fmtHms(free / maxOf(1L, bps)) + " available"
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    fun nextVq() {
+        val allowed = ArrayList<Int>()
+        for (i in vqVals.indices) if (vqSup[i]) allowed.add(i)
+        if (allowed.isEmpty()) allowed.add(0)
+        val cur = allowed.indexOf(s.vqIdx)
+        s.vqIdx = allowed[(cur + 1) % allowed.size]
+    }
+
     fun nextFps() {
         val allowed = ArrayList<Int>()
         for (i in fpsVals.indices) if (fpsSup[i] || (s.forceFps && i == 2)) allowed.add(i)
@@ -1381,6 +1511,10 @@ fun CameraScreen(onReady: () -> Unit) {
             var out: VideoOut? = null
             try {
                 while (isActive && tlOn) {
+                    if (paused) {
+                        delay(150)
+                        continue
+                    }
                     val bmp = previewView.bitmap
                     if (bmp != null) {
                         if (enc == null) {
@@ -1555,7 +1689,7 @@ fun CameraScreen(onReady: () -> Unit) {
 
     fun shutter() {
         scope.launch {
-            if (countdown > 0) return@launch
+            if (countdown > 0 || burstOn) return@launch
             if (panoOn) {
                 buzz()
                 panoOn = false
@@ -1683,6 +1817,7 @@ fun CameraScreen(onReady: () -> Unit) {
                     }
                     panoOn = false
                     torch = false
+                    if (flash == 3) flash = 0
                     aeLocked = false
                 }
             }
@@ -1694,6 +1829,8 @@ fun CameraScreen(onReady: () -> Unit) {
     BackHandler(enabled = showSettings && !showGallery) {
         if (showInfo) showInfo = false else showSettings = false
     }
+
+    val availStr = remember(elapsed / 3, isRec) { if (isRec) availText() else "" }
 
     val pillText: String? = when {
         aeLocked -> null
@@ -1714,6 +1851,7 @@ fun CameraScreen(onReady: () -> Unit) {
                     detectTapGestures(
                         onLongPress = { o ->
                             if (mode != Mode.PANO && s.tapFocus) {
+                                if (mode != Mode.PRO) ev = 0
                                 val p = previewView.meteringPointFactory.createPoint(o.x, o.y)
                                 camera?.cameraControl?.startFocusAndMetering(
                                     FocusMeteringAction.Builder(p, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
@@ -1733,8 +1871,12 @@ fun CameraScreen(onReady: () -> Unit) {
                             }
                         } else if (s.tapFocus) {
                             if (aeLocked) aeLocked = false
+                            if (mode != Mode.PRO) ev = 0
                             val p = previewView.meteringPointFactory.createPoint(o.x, o.y)
-                            camera?.cameraControl?.startFocusAndMetering(FocusMeteringAction.Builder(p).build())
+                            camera?.cameraControl?.startFocusAndMetering(
+                                FocusMeteringAction.Builder(p, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB)
+                                    .setAutoCancelDuration(4, TimeUnit.SECONDS).build()
+                            )
                             focusPos = o
                             focusTick = focusTick + 1
                         }
@@ -1841,32 +1983,45 @@ fun CameraScreen(onReady: () -> Unit) {
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
             enter = fadeIn(), exit = fadeOut()
         ) {
-            Row(
-                Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000)).padding(horizontal = 16.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (panoOn) {
-                    Text("Pan slowly  ·  $panoStrips", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                } else if (holdStill && !capturing) {
-                    Text("Hold still…", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                } else if (processing && !capturing) {
-                    Text(if (s.live && mode == Mode.PHOTO) "Live photo…" else "Saving…", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                } else {
-                    Box(Modifier.size(10.dp).clip(CircleShape).background(if (paused) YELLOW else Color(0xFFE53935)))
-                    Spacer(Modifier.width(8.dp))
-                    RecTimer({ elapsed }, paused)
-                    if (tlOn) {
-                        Spacer(Modifier.width(10.dp))
-                        Text("$tlCount frames", color = Color(0xCCFFFFFF), fontSize = 12.sp)
-                    }
-                    if (isRec && mode == Mode.VIDEO) {
-                        Spacer(Modifier.width(8.dp))
-                        PressBox({ togglePause() }, Modifier.size(32.dp)) {
-                            Text(if (paused) "▶" else "❚❚", color = Color.White, fontSize = 12.sp)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                if (panoOn || burstOn || (holdStill && !capturing) || (processing && !capturing)) {
+                    Row(
+                        Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000)).padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val label = when {
+                            panoOn -> "Pan slowly  ·  $panoStrips"
+                            burstOn -> "Burst  $burstCount / 30"
+                            holdStill -> "Hold still…"
+                            else -> if (s.live && mode == Mode.PHOTO) "Live photo…" else "Saving…"
                         }
+                        Text(label, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    Row(
+                        Modifier.clip(RoundedCornerShape(50)).background(if (paused) Color(0xFFFFA000) else Color(0xFFFF3B30))
+                            .padding(horizontal = 38.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RecTimer({ elapsed }, paused)
+                    }
+                    if (isRec && availStr.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        AvailPill(availStr)
+                    } else if (tlOn) {
+                        Spacer(Modifier.height(8.dp))
+                        AvailPill("$tlCount frames")
                     }
                 }
             }
+        }
+
+        AnimatedVisibility(
+            visible = capturing && !burstOn && (mode == Mode.VIDEO || mode == Mode.SLOMO || mode == Mode.TIMELAPSE),
+            modifier = Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 8.dp),
+            enter = fadeIn(), exit = fadeOut()
+        ) {
+            IconBox({ torch = !torch; buzz() }, torch) { FlashIcon(if (torch) 2 else 0) }
         }
 
         AnimatedVisibility(
@@ -1882,26 +2037,27 @@ fun CameraScreen(onReady: () -> Unit) {
                     IconBox({ showSettings = true }, false) { GearIcon() }
                     when (m) {
                         Mode.PHOTO -> {
-                            IconBox({ flash = (flash + 1) % 3 }, flash != 0) { FlashIcon(flash) }
+                            IconBox({ flash = (flash + 1) % 4 }, flash != 0) { FlashIcon(flash) }
                             IconBox({ timer = timerVals[(timerVals.indexOf(timer) + 1) % timerVals.size] }, timer != 0) { TimerIcon(timer) }
                             IconBox({ s.ratioIdx = (s.ratioIdx + 1) % ratios.size }, false) { TextIcon(ratios[s.ratioIdx].label, false) }
                             IconBox({ s.live = !s.live }, s.live) { LiveIcon(s.live) }
+                            IconBox({ s.burst = !s.burst }, s.burst) { BurstIcon(s.burst) }
                             IconBox({ s.hdr = !s.hdr }, s.hdr) { TextIcon("HDR", s.hdr) }
                         }
                         Mode.PRO, Mode.PORTRAIT, Mode.NIGHT -> {
-                            IconBox({ flash = (flash + 1) % 3 }, flash != 0) { FlashIcon(flash) }
+                            IconBox({ flash = (flash + 1) % 4 }, flash != 0) { FlashIcon(flash) }
                             IconBox({ timer = timerVals[(timerVals.indexOf(timer) + 1) % timerVals.size] }, timer != 0) { TimerIcon(timer) }
                             IconBox({ s.ratioIdx = (s.ratioIdx + 1) % ratios.size }, false) { TextIcon(ratios[s.ratioIdx].label, false) }
                             IconBox({ s.sizeIdx = (s.sizeIdx + 1) % sizeNames.size }, false) { TextIcon(sizeNames[s.sizeIdx], false) }
                         }
                         Mode.ULTRA, Mode.DOC -> {
-                            IconBox({ flash = (flash + 1) % 3 }, flash != 0) { FlashIcon(flash) }
+                            IconBox({ flash = (flash + 1) % 4 }, flash != 0) { FlashIcon(flash) }
                             IconBox({ timer = timerVals[(timerVals.indexOf(timer) + 1) % timerVals.size] }, timer != 0) { TimerIcon(timer) }
                             IconBox({ s.ratioIdx = (s.ratioIdx + 1) % ratios.size }, false) { TextIcon(ratios[s.ratioIdx].label, false) }
                         }
                         Mode.VIDEO -> {
                             IconBox({ torch = !torch }, torch) { FlashIcon(if (torch) 2 else 0) }
-                            IconBox({ s.vqIdx = (s.vqIdx + 1) % vqNames.size }, false) { TextIcon(vqNames[s.vqIdx], false) }
+                            IconBox({ nextVq() }, false) { TextIcon(vqNames[s.vqIdx], false) }
                             IconBox({ nextFps() }, s.forceFps && fpsVals[s.fpsIdx] > 30) {
                                 TextIcon("${fpsVals[s.fpsIdx]}fps", s.forceFps && fpsVals[s.fpsIdx] > 30)
                             }
@@ -1982,7 +2138,7 @@ fun CameraScreen(onReady: () -> Unit) {
                     zoom = { zoomShown.floatValue },
                     target = { zoomTarget.floatValue },
                     minZ = minZoom, maxZ = maxZoom,
-                    tele = if (tele != null && s.tele && !teleBroken && !front) tele.factor else null,
+                    tele = if (lens != null && lens.teleId != null && s.tele && !teleBroken && !front && camChoice == 0) lens.teleFactor else null,
                     rulerShown = rulerShown,
                     onPreset = { setZoom(it, false) },
                     onSet = { setZoom(it, true) },
@@ -2019,8 +2175,10 @@ fun CameraScreen(onReady: () -> Unit) {
                 horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
             ) {
                 if (capturing) {
-                    if (mode == Mode.VIDEO || mode == Mode.SLOMO || mode == Mode.TIMELAPSE) {
-                        PressBox({ torch = !torch; buzz() }, Modifier.size(52.dp), torch) { FlashIcon(if (torch) 2 else 0) }
+                    if (isRec && mode == Mode.VIDEO && imageCapture != null) {
+                        PressBox({ takePhoto() }, Modifier.size(52.dp).border(2.dp, Color.White, CircleShape)) {
+                            Box(Modifier.size(36.dp).clip(CircleShape).background(Color.White))
+                        }
                     } else {
                         Spacer(Modifier.size(52.dp))
                     }
@@ -2038,13 +2196,11 @@ fun CameraScreen(onReady: () -> Unit) {
                     }
                 }
 
-                ShutterButton(mode == Mode.VIDEO || mode == Mode.SLOMO || mode == Mode.TIMELAPSE, capturing) { shutter() }
+                ShutterButton(mode == Mode.VIDEO || mode == Mode.SLOMO || mode == Mode.TIMELAPSE, capturing, { shutter() }, { startBurst() }, { stopBurst() })
 
                 if (capturing) {
-                    if (isRec && mode == Mode.VIDEO && imageCapture != null) {
-                        PressBox({ takePhoto() }, Modifier.size(52.dp).border(2.dp, Color.White, CircleShape)) {
-                            Box(Modifier.size(36.dp).clip(CircleShape).background(Color.White))
-                        }
+                    if ((isRec || tlOn) && (mode == Mode.VIDEO || mode == Mode.SLOMO || mode == Mode.TIMELAPSE)) {
+                        PauseButton(paused) { togglePause() }
                     } else {
                         Spacer(Modifier.size(52.dp))
                     }
@@ -2082,7 +2238,7 @@ fun CameraScreen(onReady: () -> Unit) {
                     if (showInfo) {
                         val report = remember { cameraReport(ctx) }
                         OptionRow("Run 60 fps test (rear camera)", if (probeRunning) "Running…" else "Start") {
-                            val id = rearId
+                            val id = rearLazy.value
                             if (id == null) {
                                 toast("No rear camera found")
                             } else if (!probeRunning) {
@@ -2123,6 +2279,7 @@ fun CameraScreen(onReady: () -> Unit) {
                         OptionRow("Photo quality (JPEG)", jpegNames[s.jpegIdx]) { s.jpegIdx = (s.jpegIdx + 1) % jpegNames.size }
                         SwitchRow("Live photo", "Photo mode: saves a short motion clip with the photo (Motion Photo)", s.live) { s.live = it }
                         OptionRow("Live photo length", liveNames[s.liveIdx]) { s.liveIdx = (s.liveIdx + 1) % liveNames.size }
+                        SwitchRow("Burst shot", "Photo mode: hold the shutter to take up to 30 photos in a row", s.burst) { s.burst = it }
                         SwitchRow("HDR", "Photo mode: takes 3 photos at different brightness and merges them. Hold still.", s.hdr) { s.hdr = it }
                         OptionRow("HDR method", hdrModeNames[s.hdrMode]) { s.hdrMode = (s.hdrMode + 1) % hdrModeNames.size }
                         SwitchRow("AI enhancement", "Boosts colour and contrast after capture", s.ai) { s.ai = it }
@@ -2130,7 +2287,7 @@ fun CameraScreen(onReady: () -> Unit) {
                         SwitchRow("Scene recognition pill", "Shows what the camera is looking at", s.scenePill) { s.scenePill = it }
                         SwitchRow("Scan QR codes in Photo mode", "Show a button when a QR code is in view", s.qrScan) { s.qrScan = it }
                         SwitchRow("Wi-Fi QR: add manually", "Opens Wi-Fi settings and copies the password so Android saves the network itself", s.wifiManual) { s.wifiManual = it }
-                        SwitchRow("Telephoto lens", if (tele != null) "Switches to the 2x lens when you zoom in (camera ${tele.teleId})" else "Not exposed to apps on this ROM", s.tele) { s.tele = it }
+                        SwitchRow("Use extra lenses (ultra-wide, telephoto)", lensText(lens), s.tele) { s.tele = it }
                         OptionRow("Portrait blur strength", blurNames[s.blurIdx]) { s.blurIdx = (s.blurIdx + 1) % blurNames.size }
                         SwitchRow("Document: auto flatten", "Straightens and crops the page using the detected text", s.docAuto) { s.docAuto = it }
                         SwitchRow("Document: black & white", "Off keeps colour with a contrast boost", s.docBw) { s.docBw = it }
@@ -2145,8 +2302,8 @@ fun CameraScreen(onReady: () -> Unit) {
                         OptionRow("Watermark position", wmPosNames[s.wmPos]) { s.wmPos = (s.wmPos + 1) % wmPosNames.size }
 
                         SectionTitle("Videos")
-                        OptionRow("Video resolution", vqNames[s.vqIdx]) { s.vqIdx = (s.vqIdx + 1) % vqNames.size }
-                        OptionRow ("Video aspect ratio", ratios[s.vRatioIdx].label) { s.vRatioIdx = (s.vRatioIdx + 1) % ratios.size }
+                        OptionRow("Video resolution", vqNames[s.vqIdx]) { nextVq() }
+                        OptionRow("Video aspect ratio", ratios[s.vRatioIdx].label) { s.vRatioIdx = (s.vRatioIdx + 1) % ratios.size }
                         SwitchRow("Optical stabilization (OIS)", if (oisAvail) "Uses the lens stabilizer" else "Not offered by this camera driver", s.ois) { s.ois = it }
                         SwitchRow("Video stabilization (EIS)", if (eisAvail) "Digital stabilization for videos (crops the frame slightly)" else "Not offered by this camera driver", s.eis) { s.eis = it }
                         OptionRow("Video frame rate", "${fpsVals[s.fpsIdx]} fps" + if (fpsSup[2]) "  (60 supported)" else "") { nextFps() }
@@ -2158,7 +2315,8 @@ fun CameraScreen(onReady: () -> Unit) {
 
                         SectionTitle("Useful features")
                         OptionRow("Volume keys", volNames[s.volMode]) { s.volMode = (s.volMode + 1) % volNames.size }
-                        SwitchRow("Tap to focus", "Tap the viewfinder to focus", s.tapFocus) { s.tapFocus = it }
+                        SwitchRow("Tap to focus", "Tap the viewfinder to focus and set the exposure there", s.tapFocus) { s.tapFocus = it }
+                        SwitchRow("Continuous auto focus", "Keeps the picture sharp by itself. Turn off to focus only when you tap", s.autoFocus) { s.autoFocus = it }
                         SwitchRow("Shutter sound", "Play a sound when taking photos and videos", s.sound) { s.sound = it }
                         SwitchRow("Vibration feedback", "Vibrate when pressing the shutter and changing modes", s.vibe) { s.vibe = it }
                         SwitchRow("Keep screen on", "Prevent the screen from turning off while the camera is open", s.keepOn) { s.keepOn = it }
@@ -2218,7 +2376,7 @@ fun CameraScreen(onReady: () -> Unit) {
                             sdUri = null
                         }
                         Spacer(Modifier.height(28.dp))
-                        Text("Camera 0.6", color = Color(0x88FFFFFF), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                        Text("Camera 0.7", color = Color(0x88FFFFFF), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
                         Text("Developer: Alienluap", color = Color(0xCCFFFFFF), fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
                         Text("© Alienluap. All rights reserved.", color = Color(0x88FFFFFF), fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
                         Spacer(Modifier.height(24.dp))
