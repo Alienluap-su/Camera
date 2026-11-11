@@ -31,8 +31,8 @@ import kotlin.math.roundToInt
 import kotlin.reflect.KProperty
 
 enum class Mode(val label: String) {
-    PRO("Pro"), PANO("Panorama"), SLOMO("Slow motion"), VIDEO("Video"), PHOTO("Photo"),
-    PORTRAIT("Portrait"), NIGHT("Night"), ULTRA("Ultra HD"), DOC("Document"), TIMELAPSE("Time-lapse")
+    TIMELAPSE("Time-lapse"), SLOMO("Slow motion"), VIDEO("Video"), PHOTO("Photo"), PORTRAIT("Portrait"),
+    PRO("Pro"), ULTRA("Ultra HD"), NIGHT("Night"), PANO("Panorama"), DOC("Document")
 }
 
 val stillModes = setOf(Mode.PHOTO, Mode.PRO, Mode.PORTRAIT, Mode.NIGHT, Mode.ULTRA, Mode.DOC)
@@ -58,8 +58,8 @@ val sizeNames = listOf("Max", "8M", "3M")
 val sizeLong = listOf(0, 3264, 2048)
 val jpegNames = listOf("Max (100)", "High (95)", "Normal (85)")
 val jpegVals = listOf(100, 95, 85)
-val vqNames = listOf("4K", "1080p", "720p", "480p")
-val vqVals = listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD)
+val vqNames = listOf("Max", "4K", "1080p", "720p", "480p")
+val vqVals = listOf(Quality.HIGHEST, Quality.UHD, Quality.FHD, Quality.HD, Quality.SD)
 val fpsVals = listOf(24, 30, 60)
 val tlVals = listOf(1, 2, 5, 10)
 val timerVals = listOf(0, 2, 5, 10)
@@ -124,7 +124,7 @@ class AppSettings(private val p: SharedPreferences) {
 
     var sizeIdx by int("size", 0)
     var jpegIdx by int("jpeg", 1)
-    var vqIdx by int("vq", 1)
+    var vqIdx by int("vq2", 0)
     var fpsIdx by int("fps", 1)
     var brIdx by int("br", 0)
     var tlIdx by int("tl", 1)
@@ -136,7 +136,7 @@ class AppSettings(private val p: SharedPreferences) {
     var volMode by int("vol", 0)
     var galleryMode by int("gallery", 0)
     var wmPos by int("wmpos", 0)
-    var lastMode by int("lastmode", 4)
+    var lastMode by int("lastmode2", 3)
     var mic by bool("mic", true)
     var grid by bool("grid", false)
     var mirror by bool("mirror", true)
@@ -162,6 +162,10 @@ class AppSettings(private val p: SharedPreferences) {
     var wmDate by bool("wmdate", true)
     var wmText by str("wmtext", "Shot on Note 8")
     var galleryPkg by str("gallerypkg", "")
+    var burst by bool("burst", true)
+    var autoFocus by bool("autofocus", true)
+    var ultraBad by bool("ultrabad", false)
+    var teleBad by bool("telebad", false)
     var vRatioIdx by int("vratio", 1)
     var hdrMode by int("hdrmode", 0)
     var liveIdx by int("livelen", 1)
@@ -188,8 +192,19 @@ fun fmtTime(sec: Long): String {
 fun fmtZoom(z: Float): String =
     if (abs(z - z.roundToInt()) < 0.05f) "${z.roundToInt()}x" else "%.1fx".format(z)
 
-fun fmtPreset(z: Float): String =
-    if (abs(z - z.roundToInt()) < 0.15f) "${z.roundToInt()}" else "%.1f".format(z)
+fun fmtPreset(z: Float): String {
+    if (z < 1f) {
+        val r = (z * 10f).roundToInt() / 10f
+        return if (abs(r - r.roundToInt()) < 0.01f) "${r.roundToInt()}" else "%.1f".format(r)
+    }
+    val h = (z * 2f).roundToInt() / 2f
+    if (abs(z - h) < 0.35f) {
+        return if (abs(h - h.roundToInt()) < 0.01f) "${h.roundToInt()}" else "%.1f".format(h)
+    }
+    return "%.1f".format(z)
+}
+
+fun fmtHms(sec: Long): String = "%02d:%02d:%02d".format(sec / 3600, (sec % 3600) / 60, sec % 60)
 
 fun stampNow(): String = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
 
