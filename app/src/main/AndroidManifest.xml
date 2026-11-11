@@ -20,7 +20,7 @@
             <data android:mimeType="video/*" />
         </intent>
     </queries>
-    <application android:label="Camera" android:icon="@drawable/ic_logo"
+    <application android:name=".CamApp" android:label="Camera" android:icon="@drawable/ic_logo"
         android:allowBackup="false"
         android:largeHeap="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
