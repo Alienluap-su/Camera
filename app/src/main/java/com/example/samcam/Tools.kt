@@ -9,6 +9,7 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.media.ImageReader
 import android.media.MediaCodec
@@ -32,26 +33,62 @@ import java.nio.ByteBuffer
 
 class ProbeRes(val fps: Double, val msg: String)
 
-class TeleInfo(val wideId: String, val teleId: String, val factor: Float)
+class Lenses(val mainId: String, val teleId: String?, val teleFactor: Float, val ultraId: String?, val ultraFactor: Float)
 
-fun detectTele(ctx: Context): TeleInfo? {
+fun lensText(l: Lenses?): String {
+    if (l == null) return "No extra lens is exposed to apps on this ROM"
+    val sb = StringBuilder()
+    if (l.ultraId != null) sb.append("Ultra-wide ${fmtPreset(l.ultraFactor)}x (camera ${l.ultraId})  ")
+    if (l.teleId != null) sb.append("Telephoto ${fmtPreset(l.teleFactor)}x (camera ${l.teleId})")
+    return sb.toString().trim()
+}
+
+fun detectLenses(ctx: Context): Lenses? {
     try {
         val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val list = ArrayList<Pair<String, Float>>()
+        var mainId: String? = null
+        var mainM = 0f
+        val others = ArrayList<Pair<String, Float>>()
         for (id in cm.cameraIdList) {
             val c = cm.getCameraCharacteristics(id)
             if (c.get(CameraCharacteristics.LENS_FACING) != CameraCharacteristics.LENS_FACING_BACK) continue
+            val caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+            if (caps != null && !caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE)) continue
+            val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: continue
+            val jpg = map.getOutputSizes(ImageFormat.JPEG)
+            if (jpg == null || jpg.isEmpty()) continue
             val fl = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: continue
             val sz = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: continue
             if (sz.width <= 0f) continue
-            list.add(Pair(id, fl / sz.width))
+            val m = fl / sz.width
+            if (mainId == null) {
+                mainId = id
+                mainM = m
+            } else {
+                others.add(Pair(id, m))
+            }
         }
-        if (list.size < 2) return null
-        val wide = list.minByOrNull { it.second } ?: return null
-        val tele = list.maxByOrNull { it.second } ?: return null
-        val f = tele.second / wide.second
-        if (f < 1.5f || f > 3.5f) return null
-        return TeleInfo(wide.first, tele.first, f)
+        val main = mainId ?: return null
+        var teleId: String? = null
+        var teleF = 0f
+        var ultraId: String? = null
+        var ultraF = 0f
+        for ((id, m) in others) {
+            val f = m / mainM
+            if (f in 1.45f..4.5f) {
+                if (teleId == null || f < teleF) {
+                    teleF = f
+                    teleId = id
+                }
+            } else if (f in 0.3f..0.85f) {
+                if (ultraId == null || f < ultraF) {
+                    ultraF = f
+                    ultraId = id
+                }
+            }
+        }
+        if (teleId == null && ultraId == null) return null
+        return Lenses(main, teleId, teleF, ultraId, ultraF)
     } catch (e: Exception) {
         return null
     }
@@ -264,7 +301,8 @@ suspend fun probeOnce(ctx: Context, camId: String, fps: Int): ProbeRes {
 }
 
 fun cameraReport(ctx: Context): String {
-    val sb = StringBuilder("Device: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}\n\n")
+    val sb = StringBuilder("Device: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}\n")
+    sb.append("Lenses: ${lensText(detectLenses(ctx))}\n\n")
     val capNames = mapOf(1 to "MANUAL_SENSOR", 2 to "MANUAL_POST", 3 to "RAW", 6 to "BURST", 9 to "HIGH_SPEED", 11 to "LOGICAL_MULTI")
     try {
         val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
