@@ -11,6 +11,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -38,6 +39,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -50,6 +53,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -157,9 +161,17 @@ fun ModeStrip(pos: () -> Float, order: List<Mode>, itemW: Dp, onTap: (Mode) -> U
 }
 
 @Composable
-fun ShutterButton(video: Boolean, capturing: Boolean, onClick: () -> Unit) {
-    val src = remember { MutableInteractionSource() }
-    val pressed by src.collectIsPressedAsState()
+fun ShutterButton(
+    video: Boolean,
+    capturing: Boolean,
+    onClick: () -> Unit,
+    onHoldStart: () -> Unit = {},
+    onHoldEnd: () -> Unit = {}
+) {
+    var pressed by remember { mutableStateOf(false) }
+    val click by rememberUpdatedState(onClick)
+    val holdStart by rememberUpdatedState(onHoldStart)
+    val holdEnd by rememberUpdatedState(onHoldEnd)
     val ringScale by animateFloatAsState(targetValue = if (pressed) 0.93f else 1f, label = "ring")
     val inner by animateDpAsState(
         targetValue = if (capturing) 30.dp else if (pressed) 52.dp else 62.dp,
@@ -178,10 +190,69 @@ fun ShutterButton(video: Boolean, capturing: Boolean, onClick: () -> Unit) {
             .graphicsLayer { scaleX = ringScale; scaleY = ringScale }
             .clip(CircleShape)
             .border(4.dp, Color.White, CircleShape)
-            .clickable(interactionSource = src, indication = null, onClick = onClick),
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        pressed = true
+                        tryAwaitRelease()
+                        pressed = false
+                        holdEnd()
+                    },
+                    onLongPress = { holdStart() },
+                    onTap = { click() }
+                )
+            },
         contentAlignment = Alignment.Center
     ) {
         Box(Modifier.size(inner).clip(RoundedCornerShape(corner)).background(col))
+    }
+}
+
+@Composable
+fun PauseButton(paused: Boolean, onClick: () -> Unit) {
+    PressBox(onClick, Modifier.size(52.dp).border(2.dp, Color.White, CircleShape)) {
+        Canvas(Modifier.size(22.dp)) {
+            if (paused) {
+                val p = Path()
+                p.moveTo(size.width * 0.2f, 0f)
+                p.lineTo(size.width, size.height / 2)
+                p.lineTo(size.width * 0.2f, size.height)
+                p.close()
+                drawPath(p, Color.White)
+            } else {
+                val bw = size.width * 0.28f
+                drawRoundRect(Color.White, topLeft = Offset(size.width * 0.08f, 0f), size = androidx.compose.ui.geometry.Size(bw, size.height), cornerRadius = CornerRadius(3f))
+                drawRoundRect(Color.White, topLeft = Offset(size.width * 0.64f, 0f), size = androidx.compose.ui.geometry.Size(bw, size.height), cornerRadius = CornerRadius(3f))
+            }
+        }
+    }
+}
+
+@Composable
+fun BurstIcon(active: Boolean) {
+    val col = if (active) YELLOW else Color.White
+    Canvas(Modifier.size(24.dp)) {
+        val w = size.width
+        val h = size.height
+        val sw = w * 0.08f
+        for (k in 0 until 3) {
+            val o = k * w * 0.12f
+            drawRoundRect(
+                col, topLeft = Offset(o, h * 0.22f - o * 0.6f + o * 0.9f),
+                size = androidx.compose.ui.geometry.Size(w * 0.62f, h * 0.52f),
+                cornerRadius = CornerRadius(3f), style = Stroke(sw)
+            )
+        }
+        if (!active) {
+            drawLine(Color.White, Offset(w * 0.1f, h * 0.9f), Offset(w * 0.9f, h * 0.1f), strokeWidth = sw, cap = StrokeCap.Round)
+        }
+    }
+}
+
+@Composable
+fun AvailPill(text: String) {
+    Box(Modifier.clip(RoundedCornerShape(50)).background(Color(0x99404040)).padding(horizontal = 16.dp, vertical = 5.dp)) {
+        Text(text, color = Color.White, fontSize = 14.sp)
     }
 }
 
@@ -221,7 +292,7 @@ fun FlashIcon(state: Int) {
             p.lineTo(w * 0.78f, h * 0.40f)
             p.lineTo(w * 0.54f, h * 0.40f)
             p.close()
-            drawPath(p, col, style = Stroke(w * 0.08f))
+            drawPath(p, col, style = if (state == 3) Fill else Stroke(w * 0.08f))
             if (state == 0) {
                 drawLine(Color.White, Offset(w * 0.1f, h * 0.9f), Offset(w * 0.9f, h * 0.1f), strokeWidth = w * 0.08f, cap = StrokeCap.Round)
             }
@@ -363,7 +434,7 @@ fun TextRow(title: String, value: String, onChange: (String) -> Unit) {
 
 @Composable
 fun RecTimer(elapsed: () -> Long, paused: Boolean) {
-    Text(fmtTime(elapsed()), color = if (paused) YELLOW else Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+    Text(fmtHms(elapsed()), color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
 }
 
 @Composable
