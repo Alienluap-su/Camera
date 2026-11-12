@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas as GCanvas
+import android.graphics.Matrix
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -161,6 +162,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -170,6 +172,8 @@ import java.io.OutputStream
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import kotlin.math.abs
@@ -294,6 +298,8 @@ fun CameraScreen(onReady: () -> Unit) {
     } }
     val lensState = remember { mutableStateOf<Lenses?>(null) }
     val lens = lensState.value
+    fun ultraFOf(l: Lenses): Float = if (s.ultraSel > 0) ultraSelVals[s.ultraSel] else l.ultraFactor
+    fun teleFOf(l: Lenses): Float = if (s.teleSel > 0) teleSelVals[s.teleSel] else l.teleFactor
     val modeOrder = remember { Mode.values().toList() }
     val itemW = 104.dp
     val itemPx = with(androidx.compose.ui.platform.LocalDensity.current) { itemW.toPx() }
@@ -372,6 +378,9 @@ fun CameraScreen(onReady: () -> Unit) {
     var burstOn by remember { mutableStateOf(false) }
     var burstCount by remember { mutableIntStateOf(0) }
     var vqSup by remember { mutableStateOf(booleanArrayOf(true, true, true, true, true)) }
+    var analysisBound by remember { mutableStateOf(false) }
+    val burstChan = remember { AtomicReference<Channel<Pair<Bitmap, Int>>?>(null) }
+    val burstGrabbed = remember { AtomicInteger(0) }
     var hdrDriver by remember { mutableStateOf(false) }
     var oisAvail by remember { mutableStateOf(false) }
     var eisAvail by remember { mutableStateOf(false) }
@@ -436,9 +445,10 @@ fun CameraScreen(onReady: () -> Unit) {
     val usesRatio = isStillCat || bindCat == "t" || bindCat == "v" || bindCat == "s"
     val ratioKey = if (isStillCat) s.ratioIdx else if (bindCat == "v" || bindCat == "s") s.vRatioIdx else -1
     val capSize = if (bindCat == "u") 0 else s.sizeIdx
-    val maxQ = mode == Mode.NIGHT || mode == Mode.ULTRA || s.prioIdx == 0 || s.jpegIdx == 0
+    val burstFastWanted = s.burst && s.burstFast && mode == Mode.PHOTO
+    val maxQ = mode == Mode.NIGHT || mode == Mode.ULTRA || (s.prioIdx == 0 && !s.burst) || s.jpegIdx == 0
     val liveWanted = s.live && mode == Mode.PHOTO
-    val analysisWanted = isStillCat && ((mode == Mode.PHOTO && s.qrScan) || s.scenePill || mode == Mode.DOC)
+    val analysisWanted = isStillCat && ((mode == Mode.PHOTO && s.qrScan) || s.scenePill || mode == Mode.DOC || burstFastWanted)
     val fullAr = if (screenH > 0) screenW.toFloat() / screenH else 0.5f
     val ratioIdxNow = if (bindCat == "v" || bindCat == "s") s.vRatioIdx else s.ratioIdx
     val arTarget = if (usesRatio) ratioAr(ratioIdxNow, fullAr) else 0.5625f
@@ -622,7 +632,7 @@ fun CameraScreen(onReady: () -> Unit) {
         }
     }
 
-    LaunchedEffect(lens, s.tele, front, camChoice, teleBroken, ultraBroken) {
+    LaunchedEffect(lens, s.tele, front, camChoice, teleBroken, ultraBroken, s.ultraSel, s.teleSel) {
         val l = lens ?: return@LaunchedEffect
         if (!s.tele || front || camChoice > 0) {
             if (useTele) useTele = false
@@ -632,8 +642,8 @@ fun CameraScreen(onReady: () -> Unit) {
         snapshotFlow { zoomTarget.floatValue }.collect { z ->
             if (!capturingNow.value) {
                 if (l.teleId != null && !teleBroken) {
-                    if (!useTele && !useUltra && z >= l.teleFactor) useTele = true
-                    else if (useTele && z < l.teleFactor * 0.94f) useTele = false
+                    if (!useTele && !useUltra && z >= teleFOf(l)) useTele = true
+                    else if (useTele && z < teleFOf(l) * 0.94f) useTele = false
                 }
                 if (l.ultraId != null && !ultraBroken && camMin >= 0.95f) {
                     if (!useUltra && !useTele && z < 0.97f) useUltra = true
@@ -704,7 +714,7 @@ fun CameraScreen(onReady: () -> Unit) {
     }
 
     LaunchedEffect(
-        bindCat, front, camChoice, useTele, useUltra, ratioKey, capSize, maxQ, liveWanted, analysisWanted,
+        bindCat, front, camChoice, useTele, useUltra, s.ultraSel, s.teleSel, burstFastWanted, ratioKey, capSize, maxQ, liveWanted, analysisWanted,
         s.vqIdx, s.fpsIdx, s.brIdx, camPaused, s.engine, screenW
     ) {
         if (screenW == 0) return@LaunchedEffect
@@ -742,7 +752,7 @@ fun CameraScreen(onReady: () -> Unit) {
         val anaRs = ResolutionSelector.Builder().setAspectRatioStrategy(aspect)
             .setResolutionStrategy(
                 ResolutionStrategy(
-                    if (sensor169) Size(1280, 720) else Size(960, 720),
+                    if (burstFastWanted) { if (sensor169) Size(1920, 1080) else Size(1440, 1080) } else if (sensor169) Size(1280, 720) else Size(960, 720),
                     ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
                 )
             ).build()
@@ -819,6 +829,21 @@ fun CameraScreen(onReady: () -> Unit) {
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
                     var lastScan = 0L
                     analysis.setAnalyzer(analysisExec) { proxy ->
+                        val bch = burstChan.get()
+                        if (bch != null && burstGrabbed.get() < 30) {
+                            try {
+                                val bm = proxy.toBitmap()
+                                val rt = proxy.imageInfo.rotationDegrees
+                                proxy.close()
+                                if (bch.trySend(Pair(bm, rt)).isSuccess) burstGrabbed.incrementAndGet() else bm.recycle()
+                            } catch (e: Exception) {
+                                try {
+                                    proxy.close()
+                                } catch (x: Exception) {
+                                }
+                            }
+                            return@setAnalyzer
+                        }
                         val now = System.currentTimeMillis()
                         if (now - lastScan < 650 || analyzeBusy.get()) {
                             proxy.close()
@@ -901,6 +926,7 @@ fun CameraScreen(onReady: () -> Unit) {
         aeLocked = false
         focusUiOn = false
         liveReady = boundAt?.video == true && stillCat
+        analysisBound = boundAt?.analysis == true && stillCat
         if (liveWanted && !liveReady) toast("Live photo isn't supported by this camera driver (it needs photo and video at once).")
         if ((bindCat == "v" || bindCat == "s") && boundAt?.still == false) {
             toast("Taking photos while recording isn't supported by this camera driver")
@@ -916,7 +942,7 @@ fun CameraScreen(onReady: () -> Unit) {
         val zst = cam.cameraInfo.zoomState.value
         camMin = zst?.minZoomRatio ?: 1f
         camMax = zst?.maxZoomRatio ?: 1f
-        camBase = if (useTele && lens != null) lens.teleFactor else if (useUltra && lens != null) lens.ultraFactor else 1f
+        camBase = if (useTele && lens != null) teleFOf(lens) else if (useUltra && lens != null) ultraFOf(lens) else 1f
         if (front != lastFront || camChoice != lastCamChoice) {
             lastFront = front
             lastCamChoice = camChoice
@@ -974,12 +1000,12 @@ fun CameraScreen(onReady: () -> Unit) {
         }
     }
 
-    LaunchedEffect(lens, s.tele, teleBroken, ultraBroken, front, camChoice, camMin, camMax, camBase, useTele, useUltra) {
+    LaunchedEffect(lens, s.tele, teleBroken, ultraBroken, front, camChoice, camMin, camMax, camBase, useTele, useUltra, s.ultraSel, s.teleSel) {
         val l = lens
         var mn = camMin * camBase
         var mx = minOf(camMax * camBase, 10f)
         if (l != null && s.tele && !front && camChoice == 0) {
-            if (l.ultraId != null && !ultraBroken && camMin >= 0.95f) mn = minOf(mn, l.ultraFactor)
+            if (l.ultraId != null && !ultraBroken && camMin >= 0.95f) mn = minOf(mn, ultraFOf(l))
             if (useTele) mn = minOf(mn, 1f)
             if ((l.teleId != null && !teleBroken) || (l.ultraId != null && !ultraBroken)) mx = 10f
         }
@@ -1444,18 +1470,77 @@ fun CameraScreen(onReady: () -> Unit) {
         burstOn = true
         burstCount = 0
         buzz()
+        val fast = s.burstFast && analysisBound
         scope.launch {
-            try {
-                while (burstOn && burstCount < 30) {
-                    snd(MediaActionSound.SHUTTER_CLICK)
-                    val d = CompletableDeferred<Boolean>()
-                    takePlain { d.complete(it) }
-                    val ok = withTimeoutOrNull(6000L) { d.await() } == true
-                    if (!ok) break
-                    burstCount = burstCount + 1
+            if (fast) {
+                val ch = Channel<Pair<Bitmap, Int>>(8)
+                burstGrabbed.set(0)
+                val mirrorNow = front && s.mirror
+                val treeNow = sdUri
+                val lastRef = AtomicReference<Uri?>(null)
+                val writers = (0 until 3).map { w ->
+                    launch(Dispatchers.IO) {
+                        for (item in ch) {
+                            val bmp = item.first
+                            try {
+                                val m = Matrix()
+                                m.postRotate(item.second.toFloat())
+                                if (mirrorNow) m.postScale(-1f, 1f)
+                                val out = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                                val bos = java.io.ByteArrayOutputStream()
+                                out.compress(Bitmap.CompressFormat.JPEG, 92, bos)
+                                val uri = saveBytes(ctx, bos.toByteArray(), treeNow, "BURST_${stampNow()}_$w", "image/jpeg")
+                                if (uri != null) lastRef.set(uri)
+                                if (out !== bmp) out.recycle()
+                            } catch (e: Throwable) {
+                            }
+                            bmp.recycle()
+                        }
+                    }
                 }
-            } finally {
+                burstChan.set(ch)
+                snd(MediaActionSound.SHUTTER_CLICK)
+                try {
+                    while (burstOn && burstGrabbed.get() < 30) {
+                        burstCount = burstGrabbed.get()
+                        delay(12)
+                    }
+                } finally {
+                    burstChan.set(null)
+                    ch.close()
+                }
+                burstCount = burstGrabbed.get()
+                writers.forEach { it.join() }
                 burstOn = false
+                setLast(lastRef.get(), "image/jpeg")
+            } else {
+                var fired = 0
+                var inflight = 0
+                var failed = false
+                try {
+                    while (burstOn && fired < 30 && !failed) {
+                        if (inflight >= 3) {
+                            delay(8)
+                            continue
+                        }
+                        fired++
+                        inflight++
+                        burstCount = fired
+                        snd(MediaActionSound.SHUTTER_CLICK)
+                        takePlain { ok ->
+                            inflight--
+                            if (!ok) {
+                                failed = true
+                                burstCount = maxOf(0, burstCount - 1)
+                            }
+                        }
+                        delay(25)
+                    }
+                    val t0 = System.currentTimeMillis()
+                    while (inflight > 0 && System.currentTimeMillis() - t0 < 12000L) delay(20)
+                } finally {
+                    burstOn = false
+                }
             }
             toast(if (burstCount >= 30) "Burst limit reached: 30 photos" else "Burst: $burstCount photos")
         }
@@ -1816,6 +1901,7 @@ fun CameraScreen(onReady: () -> Unit) {
                         tlJob?.cancel()
                     }
                     panoOn = false
+                    burstOn = false
                     torch = false
                     if (flash == 3) flash = 0
                     aeLocked = false
@@ -2138,7 +2224,7 @@ fun CameraScreen(onReady: () -> Unit) {
                     zoom = { zoomShown.floatValue },
                     target = { zoomTarget.floatValue },
                     minZ = minZoom, maxZ = maxZoom,
-                    tele = if (lens != null && lens.teleId != null && s.tele && !teleBroken && !front && camChoice == 0) lens.teleFactor else null,
+                    tele = if (lens != null && lens.teleId != null && s.tele && !teleBroken && !front && camChoice == 0) teleFOf(lens) else null,
                     rulerShown = rulerShown,
                     onPreset = { setZoom(it, false) },
                     onSet = { setZoom(it, true) },
@@ -2280,6 +2366,7 @@ fun CameraScreen(onReady: () -> Unit) {
                         SwitchRow("Live photo", "Photo mode: saves a short motion clip with the photo (Motion Photo)", s.live) { s.live = it }
                         OptionRow("Live photo length", liveNames[s.liveIdx]) { s.liveIdx = (s.liveIdx + 1) % liveNames.size }
                         SwitchRow("Burst shot", "Photo mode: hold the shutter to take up to 30 photos in a row", s.burst) { s.burst = it }
+                        SwitchRow("Fast burst (HD frames)", "Grabs up to 30 HD frames in about a second. Off = full-resolution photos, slower", s.burstFast) { s.burstFast = it }
                         SwitchRow("HDR", "Photo mode: takes 3 photos at different brightness and merges them. Hold still.", s.hdr) { s.hdr = it }
                         OptionRow("HDR method", hdrModeNames[s.hdrMode]) { s.hdrMode = (s.hdrMode + 1) % hdrModeNames.size }
                         SwitchRow("AI enhancement", "Boosts colour and contrast after capture", s.ai) { s.ai = it }
@@ -2288,6 +2375,16 @@ fun CameraScreen(onReady: () -> Unit) {
                         SwitchRow("Scan QR codes in Photo mode", "Show a button when a QR code is in view", s.qrScan) { s.qrScan = it }
                         SwitchRow("Wi-Fi QR: add manually", "Opens Wi-Fi settings and copies the password so Android saves the network itself", s.wifiManual) { s.wifiManual = it }
                         SwitchRow("Use extra lenses (ultra-wide, telephoto)", lensText(lens), s.tele) { s.tele = it }
+                        if (lens != null && lens.ultraId != null) {
+                            OptionRow("Ultra-wide zoom label", ultraSelNames[s.ultraSel] + (if (s.ultraSel == 0) "  (detected ${fmtPreset(lens.ultraFactor)})" else "")) {
+                                s.ultraSel = (s.ultraSel + 1) % ultraSelNames.size
+                            }
+                        }
+                        if (lens != null && lens.teleId != null) {
+                            OptionRow("Telephoto zoom label", teleSelNames[s.teleSel] + (if (s.teleSel == 0) "  (detected ${fmtPreset(lens.teleFactor)})" else "")) {
+                                s.teleSel = (s.teleSel + 1) % teleSelNames.size
+                            }
+                        }
                         OptionRow("Portrait blur strength", blurNames[s.blurIdx]) { s.blurIdx = (s.blurIdx + 1) % blurNames.size }
                         SwitchRow("Document: auto flatten", "Straightens and crops the page using the detected text", s.docAuto) { s.docAuto = it }
                         SwitchRow("Document: black & white", "Off keeps colour with a contrast boost", s.docBw) { s.docBw = it }
@@ -2376,7 +2473,7 @@ fun CameraScreen(onReady: () -> Unit) {
                             sdUri = null
                         }
                         Spacer(Modifier.height(28.dp))
-                        Text("Camera 0.7", color = Color(0x88FFFFFF), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                        Text("Camera 0.8", color = Color(0x88FFFFFF), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
                         Text("Developer: Alienluap", color = Color(0xCCFFFFFF), fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
                         Text("© Alienluap. All rights reserved.", color = Color(0x88FFFFFF), fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
                         Spacer(Modifier.height(24.dp))
