@@ -24,6 +24,8 @@ import android.os.HandlerThread
 import android.os.ParcelFileDescriptor
 import android.util.Range
 import android.view.Surface
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
@@ -43,6 +45,20 @@ fun lensText(l: Lenses?): String {
     return sb.toString().trim()
 }
 
+private fun camMetric(c: CameraCharacteristics): Float? {
+    val fl = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: return null
+    val sz = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return null
+    if (sz.width <= 0f || sz.height <= 0f) return null
+    var diag = hypot(sz.width, sz.height)
+    val pix = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+    val act = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+    if (pix != null && act != null && pix.width > 0 && pix.height > 0) {
+        val ratio = hypot(act.width().toFloat(), act.height().toFloat()) / hypot(pix.width.toFloat(), pix.height.toFloat())
+        if (ratio in 0.3f..1.0f) diag *= ratio
+    }
+    return fl / diag
+}
+
 fun detectLenses(ctx: Context): Lenses? {
     try {
         val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -57,10 +73,7 @@ fun detectLenses(ctx: Context): Lenses? {
             val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: continue
             val jpg = map.getOutputSizes(ImageFormat.JPEG)
             if (jpg == null || jpg.isEmpty()) continue
-            val fl = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: continue
-            val sz = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: continue
-            if (sz.width <= 0f) continue
-            val m = fl / sz.width
+            val m = camMetric(c) ?: continue
             if (mainId == null) {
                 mainId = id
                 mainM = m
@@ -88,7 +101,7 @@ fun detectLenses(ctx: Context): Lenses? {
             }
         }
         if (teleId == null && ultraId == null) return null
-        return Lenses(main, teleId, teleF, ultraId, ultraF)
+        return Lenses(main, teleId, teleF, ultraId, (ultraF * 10f).roundToInt() / 10f)
     } catch (e: Exception) {
         return null
     }
