@@ -10,8 +10,8 @@ android {
         applicationId = "com.alienluap.camera"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.7"
+        versionCode = 8
+        versionName = "0.8"
         buildConfigField("String", "CERT_SHA", "\"${providers.gradleProperty("certSha").getOrElse("")}\"")
     }
     signingConfigs {
